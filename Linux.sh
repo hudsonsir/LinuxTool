@@ -11,6 +11,47 @@ WHITE='\033[0;37m'
 RESET='\033[0m'
 
 
+# 检测并自动安装 sudo（部分精简系统镜像默认未安装）
+ensure_sudo() {
+    if command -v sudo &> /dev/null; then
+        return 0
+    fi
+
+    echo "未检测到 sudo，正在尝试自动安装..."
+
+    # 当前未必是 root，无法用 sudo 自我提升，这里直接以现有权限安装
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "当前用户非 root，且系统未安装 sudo，无法自动安装。"
+        echo "请先以 root 身份登录后重新执行本脚本。"
+        exit 1
+    fi
+
+    if command -v apt-get &> /dev/null; then
+        apt-get update -y && apt-get install -y sudo
+    elif command -v dnf &> /dev/null; then
+        dnf install -y sudo
+    elif command -v yum &> /dev/null; then
+        yum install -y sudo
+    elif command -v apk &> /dev/null; then
+        apk add --no-cache sudo
+    elif command -v pacman &> /dev/null; then
+        pacman -Sy --noconfirm sudo
+    elif command -v zypper &> /dev/null; then
+        zypper install -y sudo
+    else
+        echo "未识别的包管理器，无法自动安装 sudo，请手动安装后重试。"
+        exit 1
+    fi
+
+    if ! command -v sudo &> /dev/null; then
+        echo "sudo 安装失败，请检查网络或软件源后手动安装。"
+        exit 1
+    fi
+    echo "sudo 安装完成。"
+}
+
+ensure_sudo
+
 # 获取服务器IP地址
 server_ip=$(hostname -I)
 
@@ -259,7 +300,7 @@ review_files_custom() {
     if [ -d "$directory_path" ]; then
         echo "请输入关键词："
         read keyword
-        echo "开始搜索关键词 '$keyword' 在目录 '$directory_path' 中..."
+        echo "开始搜���关键词 '$keyword' 在目录 '$directory_path' 中..."
         grep -rl "$keyword" "$directory_path"
     else
         echo "输入的路径不是有效的目录，请重新输入。"
@@ -799,7 +840,7 @@ function set_dns() {
 
 # 一键更新 CentOS 最新版系统
 update_centos() {
-    read -p "确认要更新 CentOS 最新版系统吗？(y/n): " confirm
+    read -p "确���要更新 CentOS 最新版系统吗？(y/n): " confirm
     if [[ $confirm == [yY] ]]; then
         echo "正在更新 CentOS 最新版系统..."
         # 在这里添加更新 CentOS 的命令
