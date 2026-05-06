@@ -44,7 +44,7 @@ $greeting
 system_menu() {
     clear
     echo "=== 系统操作菜单 ==="
-    echo "1. 一键重启服务器"
+    echo "1. 更新本地脚本"
     echo "2. 一键修改密码"
     echo "3. 一键同步上海时间"
     echo "4. 一键修改SSH端口"
@@ -652,6 +652,54 @@ function enable_nested_virtualization() {
 
 
 
+# 更新本地脚本
+update_script() {
+    local remote_url="https://raw.githubusercontent.com/hudsonsir/LinuxTool/main/Linux.sh"
+    local script_path
+    script_path="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+
+    echo "正在从 GitHub 拉取最新版本的脚本..."
+    echo "源地址: $remote_url"
+    echo "本地路径: $script_path"
+
+    if ! command -v curl &> /dev/null; then
+        echo "未检测到 curl，请先安装 curl 后再试。"
+        return 1
+    fi
+
+    local tmp_file
+    tmp_file="$(mktemp)"
+    if ! curl -fsSL "$remote_url" -o "$tmp_file"; then
+        echo "下载失败，请检查网络或稍后重试。"
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    if [ ! -s "$tmp_file" ]; then
+        echo "下载到的文件为空，已取消更新。"
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    if ! bash -n "$tmp_file" 2>/dev/null; then
+        echo "新脚本语法校验失败，已取消更新。"
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    cp "$script_path" "${script_path}.bak" 2>/dev/null && echo "已备份当前脚本到 ${script_path}.bak"
+    if ! cat "$tmp_file" > "$script_path"; then
+        echo "写入失败，请使用 sudo 重新运行后再试。"
+        rm -f "$tmp_file"
+        return 1
+    fi
+    chmod +x "$script_path"
+    rm -f "$tmp_file"
+
+    echo "脚本更新完成，正在重新加载..."
+    exec bash "$script_path"
+}
+
 # 重启服务器
 restart_server() {
     read -p "确认要重启服务器吗？(y/n): " confirm
@@ -800,7 +848,7 @@ change_system_mirror() {
     bash <(curl -sSL https://linuxmirrors.cn/main.sh)
 }
 
-# 检查并安装ntpdate
+# 检查并���装ntpdate
 install_ntpdate() {
     if ! command -v ntpdate &> /dev/null; then
         echo "正在安装ntpdate..."
@@ -957,7 +1005,7 @@ do
                 read -p "请输入选项: " system_choice
                 case $system_choice in
                     1)
-                        restart_server
+                        update_script
                         ;;
                     2)
                         change_password
