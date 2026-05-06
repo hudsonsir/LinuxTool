@@ -58,6 +58,7 @@ system_menu() {
     echo "12. 一键查看当前与服务器连接的IP"
     echo "13. 一键修改服务器主机名"
     echo "14. 一键查看SSH登录成功的IP地址"
+    echo "15. 查看当前服务器时区时间"
     echo "q. 返回上级菜单"
     echo "===================="
 }
@@ -221,8 +222,21 @@ fi
 
 
 
-# 查看登录成功的IP
-show_login_ips() {
+  # 查看当前服务器时区与时间
+  show_timezone() {
+    echo "=== 服务器时区与时间 ==="
+    if command -v timedatectl &> /dev/null; then
+        timedatectl
+    else
+        echo "当前时区: $(cat /etc/timezone 2>/dev/null || readlink -f /etc/localtime | sed 's|.*/zoneinfo/||')"
+        echo "本地时间: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+        echo "UTC 时间: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+    fi
+    echo "========================"
+  }
+
+  # 查看登录成功的IP
+  show_login_ips() {
     # 从正确的日志文件中提取登录成功的IP地址
     grep 'sshd.*Accepted' "$log_file_path" | awk '{print $11}' | sort | uniq
 }
@@ -570,7 +584,7 @@ format_disk() {
     fs_type=${fs_type:-ext4}
 
     # 确认操作
-    read -p "您确定要格式化硬盘 $disk_name 为文件系统 $fs_type 吗？(y/n)：" confirm
+    read -p "您确定要格式化硬盘 $disk_name 为文���系统 $fs_type 吗？(y/n)：" confirm
     if [ "$confirm" != "y" ]; then
         echo "取消操作。"
         exit 0
@@ -806,7 +820,7 @@ install_ntpdate() {
 
 # 函数：显示服务器配置信息
 show_server_config() {
-    echo "=== 服务器配置信息 ==="
+    echo "=== 服务��配置信息 ==="
     echo "CPU核心数:"
     lscpu | grep -w "CPU(s):" | grep -v "\-"
     lscpu | grep -w "Model name:"
@@ -980,6 +994,7 @@ do
                         change_hostname
                         ;;
                     14) show_login_ips;;
+                    15) show_timezone;;
                     q)
                         break
                         ;;
