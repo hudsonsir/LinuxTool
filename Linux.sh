@@ -53,14 +53,11 @@ system_menu() {
     echo "7. 一键更新CentOS最新版系统"
     echo "8. 一键更新Ubuntu最新版系统"
     echo "9. 一键更新Debian最新版系统"
-    echo "10. 一键更换CentOS yum源"
-    echo "11. 一键更换Ubuntu apt源"
-    echo "12. 一键更换Debian apt源"
-    echo "13. 一键创建子用户或管理员"
-    echo "14. 一键查看当前与服务器连接的IP"
-    echo "15. 一键修改服务器主机名"
-    echo "16. 一键更换CentOS8 stream仓库源"
-    echo "17. 一键查看SSH登录成功的IP地址"
+    echo "10. 一键更换系统软件源(LinuxMirrors)"
+    echo "11. 一键创建子用户或管理员"
+    echo "12. 一键查看当前与服务器连接的IP"
+    echo "13. 一键修改服务器主机名"
+    echo "14. 一键查看SSH登录成功的IP地址"
     echo "q. 返回上级菜单"
     echo "===================="
 }
@@ -199,18 +196,6 @@ check_dns_udp() {
     fi
 }
 
-
-
-# 更新YUM仓库源
-update_repo() {
-    echo "正在更新YUM仓库源到阿里云镜像..."
-    # 使用sed命令修改仓库配置文件
-    sed -e "s|^mirrorlist=|#mirrorlist=|g" -e "s|^#baseurl=http://mirror.centos.org/\$contentdir/|baseurl=https://mirrors.aliyun.com/centos-vault/|g" -i.bak /etc/yum.repos.d/CentOS-Stream-*.repo
-
-    # 刷新YUM缓存
-    yum makecache
-    echo "YUM仓库源更新完成。"
-}
 
 
 # 检测操作系统并设置日志文件路径
@@ -789,65 +774,16 @@ update_debian() {
 
 
 
-# 更换CentOS 7源为阿里云源的函数
-change_centos_to_aliyun() {
-    if [ -f /etc/yum.repos.d/CentOS-Base.repo ]; then
-        echo "正在更换CentOS的源为阿里云源..."
-        sudo cp /etc/yum.repos.d/CentOS-Base.repo /etc/yum.repos.d/CentOS-Base.repo.backup
-        cat << 'EOF' | sudo tee /etc/yum.repos.d/CentOS-Base.repo
-[base]
-name=CentOS-$releasever - Base - 阿里云镜像
-baseurl=http://mirrors.aliyun.com/centos/$releasever/os/$basearch/
-gpgcheck=1
-gpgkey=http://mirrors.aliyun.com/centos/RPM-GPG-KEY-CentOS-7
-
-# 可选的，添加阿里云的额外源
-[extras]
-name=CentOS-$releasever - Extras - 阿里云镜像
-baseurl=http://mirrors.aliyun.com/centos/$releasever/extras/$basearch/
-gpgcheck=1
-gpgkey=http://mirrors.aliyun.com/centos/RPM-GPG-KEY-CentOS-7
-
-# 可选的，添加阿里云的更新源
-[updates]
-name=CentOS-$releasever - Updates - 阿里云镜像
-baseurl=http://mirrors.aliyun.com/centos/$releasever/updates/$basearch/
-gpgcheck=1
-gpgkey=http://mirrors.aliyun.com/centos/RPM-GPG-KEY-CentOS-7
-EOF
-        sudo yum clean all
-        sudo yum makecache
-        echo "CentOS源更换完成。"
-    else
-        echo "CentOS源配置文件不存在。"
+# 使用 LinuxMirrors 一键更换系统软件源
+# 项目地址: https://github.com/SuperManito/LinuxMirrors
+change_system_mirror() {
+    echo "即将调用 LinuxMirrors 一键换源脚本..."
+    echo "项目地址: https://github.com/SuperManito/LinuxMirrors"
+    if ! command -v curl &> /dev/null; then
+        echo "未检测到 curl，请先安装 curl 后再试。"
+        return 1
     fi
-}
-
-# 更换Ubuntu 20.04源为阿里云源的函数
-change_ubuntu_to_aliyun() {
-    if [ -f /etc/apt/sources.list ]; then
-        echo "正在更换Ubuntu的源为阿里云源..."
-        sudo cp /etc/apt/sources.list /etc/apt/sources.list.backup
-        sudo sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list
-        sudo sed -i 's/security.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list
-        echo "Ubuntu源更换完成。"
-    else
-        echo "Ubuntu源配置文件不存在。"
-    fi
-}
-
-
-
-# 更换Debian源为阿里云源的函数
-change_debian_to_aliyun() {
-    if [ -f /etc/apt/sources.list ]; then
-        echo "正在更换Debian的源为阿里云源..."
-        sudo cp /etc/apt/sources.list /etc/apt/sources.list.backup
-        sudo sed -i 's|http://[^ ]*|http://mirrors.aliyun.com|' /etc/apt/sources.list
-        echo "Debian源更换完成。"
-    else
-        echo "Debian源配置文件不存在。"
-    fi
+    bash <(curl -sSL https://linuxmirrors.cn/main.sh)
 }
 
 # 检查并安装ntpdate
@@ -1033,21 +969,17 @@ do
                     9)
                         update_debian
                         ;;
-                    10) change_centos_to_aliyun;;
-                    11) change_ubuntu_to_aliyun;;
-                    12) change_debian_to_aliyun;;
-                    13)
+                    10) change_system_mirror;;
+                    11)
                         create_user
-                        ;;     
-                    14)
+                        ;;
+                    12)
                         show_connected_ips_count
-                        ;;     
-                    15)
+                        ;;
+                    13)
                         change_hostname
-                        ;;   
-                    16) update_repo;;
-                    
-                    17) show_login_ips;;
+                        ;;
+                    14) show_login_ips;;
                     q)
                         break
                         ;;
