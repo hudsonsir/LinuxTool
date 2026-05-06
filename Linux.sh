@@ -32,6 +32,7 @@ show_menu() {
 
    1. 系统操作菜单(修改密码、SSH端口、更新系统等)
    q. 退出脚本
+   u. 卸载脚本
 
 ===================================================
 $greeting
@@ -652,6 +653,30 @@ function enable_nested_virtualization() {
 
 
 
+# 卸载本地脚本
+uninstall_script() {
+    local script_path
+    script_path="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+
+    echo "即将卸载本地脚本: $script_path"
+    read -p "确认删除该脚本及其备份文件吗？(y/N): " confirm
+    case "$confirm" in
+        y|Y|yes|YES)
+            rm -f "${script_path}.bak" 2>/dev/null
+            if rm -f "$script_path"; then
+                echo "脚本已成功卸载，再见！"
+                exit 0
+            else
+                echo "删除失败，请使用 sudo 重新运行后再试。"
+                return 1
+            fi
+            ;;
+        *)
+            echo "已取消卸载。"
+            ;;
+    esac
+}
+
 # 更新本地脚本
 update_script() {
     local remote_url="https://raw.githubusercontent.com/hudsonsir/LinuxTool/main/Linux.sh"
@@ -1056,6 +1081,9 @@ do
         q)
             echo "再见！"
             break
+            ;;
+        u|U)
+            uninstall_script
             ;;
         *)
             echo "无效的选项，请重新输入"
