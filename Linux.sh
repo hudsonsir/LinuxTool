@@ -312,42 +312,99 @@ review_files_custom() {
 
 # 修改主机名的函数
 change_hostname() {
-    local new_hostname
-    read -p "请输入新的主机名：" new_hostname
-    if [ -n "$new_hostname" ]; then
-        sudo hostnamectl set-hostname "$new_hostname"
-        if [ $? -eq 0 ]; then
-            echo "主机名已成功修改为：$new_hostname"
-        else
-            echo "修改主机名失败，请检查输入是否有误。"
-        fi
-    else
-        echo "输入的主机名不能为空。"
+    local new_hostname old_hostname
+    old_hostname=$(hostname 2>/dev/null)
+
+    read -p "请输入新的主机名 (当前: ${old_hostname}): " new_hostname
+
+    # ── 输入校验 ──────────────────────────────────────────
+    if [ -z "$new_hostname" ]; then
+        echo "错误：主机名不能为空。"
+        return 1
     fi
-}
 
+    if [ "${#new_hostname}" -gt 63 ]; then
+        echo "错误：主机名长度不能超过 63 个字符。"
+        return 1
+    fi
 
+    # RFC 1123：允许字母、数字、连字符，不能以连字符开头/结尾
+    if ! [[ "$new_hostname" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$ ]]; then
+        echo "错误：主机名仅允许字母、数字和连字符，且不能以连字符开头或结尾。"
+        return 1
+    fi
 
-# 定义函数：关闭 SELinux
-disable_selinux() {
-    # 检查当前 SELinux 的状态
-    sestatus=$(sestatus | awk '{print $3}')
+    if [ "$new_hostname" = "$old_hostname" ]; then
+        echo "新主机名与当前一致，无需修改。"
+        return 0
+    fi
 
-    if [[ $sestatus == "enabled" ]]; then
-        echo "当前 SELinux 状态为已启用。"
-        echo "正在关闭 SELinux..."
+    echo "正在将主机名从 [${old_hostname}] 修改为 [${new_hostname}]..."
 
-        # 临时禁用 SELinux
-        setenforce 0
+    # ── 备份 /etc/hostname 和 /etc/hosts ──────────────────
+    [ -f /etc/hostname ] && sudo cp /etc/hostname /etc/hostname.bak 2>/dev/null
+    [ -f /etc/hosts ]    && sudo cp /etc/hosts    /etc/hosts.bak    2>/dev/null
 
-        # 检查 SELinux 是否成功禁用
-        if [[ $(sestatus | awk '{print $3}') == "disabled" ]]; then
-            echo "SELinux 已成功禁用。"
-        else
-            echo "无法禁用 SELinux。"
+    # ── 执行修改：三级兜底 ────────────────────────────────
+    local success=0
+
+    # 方式 1：systemd 的 hostnamectl（推荐，会同步多个层级）
+    if command -v hostnamectl &> /dev/null; then
+        if sudo hostnamectl set-hostname "$new_hostname" 2>/dev/null; then
+            success=1
         fi
+    fi
+
+    # 方式 2：hostname 命令 + 写入 /etc/hostname（用于 Alpine、容器、老系统）
+    if [ $success -eq 0 ]; then
+        if command -v hostname &> /dev/null; then
+            sudo hostname "$new_hostname" 2>/dev/null && success=1
+        fi
+        # 持久化到 /etc/hostname
+        echo "$new_hostname" | sudo tee /etc/hostname > /dev/null 2>&1 && success=1
+    fi
+
+    # 方式 3：直接写文件（最低级兜底）
+    if [ $success -eq 0 ]; then
+        if echo "$new_hostname" | sudo tee /etc/hostname > /dev/null; then
+            success=1
+        fi
+    fi
+
+    if [ $success -eq 0 ]; then
+        echo "错误：修改主机名失败，已尝试所有方法。"
+        # 回滚 /etc/hostname
+        [ -f /etc/hostname.bak ] && sudo mv /etc/hostname.bak /etc/hostname 2>/dev/null
+        return 1
+    fi
+
+    # ── 同步更新 /etc/hosts ───────────────────────────────
+    # 避免 sudo 报 "unable to resolve host" 警告
+    if [ -f /etc/hosts ]; then
+        if grep -q "127.0.1.1" /etc/hosts; then
+            # Debian/Ubuntu 风格：替换 127.0.1.1 这一行
+            sudo sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t${new_hostname}/" /etc/hosts
+        elif [ -n "$old_hostname" ] && grep -qw "$old_hostname" /etc/hosts; then
+            # 替换所有出现的旧主机名
+            sudo sed -i "s/\b${old_hostname}\b/${new_hostname}/g" /etc/hosts
+        else
+            # 未找到对应行则追加一条
+            echo -e "127.0.1.1\t${new_hostname}" | sudo tee -a /etc/hosts > /dev/null
+        fi
+    fi
+
+    # ── 验证 ──────────────────────────────────────────────
+    local current_hostname
+    current_hostname=$(hostname 2>/dev/null)
+    if [ "$current_hostname" = "$new_hostname" ]; then
+        echo "✓ 主机名已成功修改为：$new_hostname"
+        echo "  当前生效主机名：$current_hostname"
+        echo "  提示：部分 Shell 提示符可能需要重新登录才会刷新。"
+        # 清理备份
+        sudo rm -f /etc/hostname.bak /etc/hosts.bak 2>/dev/null
     else
-        echo "当前 SELinux 状态为已禁用。"
+        echo "⚠ 主机名文件已修改，但运行时主机名仍为：${current_hostname}"
+        echo "  请重启系统或重新登录使其完全生效。"
     fi
 }
 
