@@ -101,6 +101,7 @@ system_menu() {
     echo "13. 一键修改服务器主机名"
     echo "14. 一键查看SSH登录成功的IP地址"
     echo "15. 查看当前服务器时区时间"
+    echo "16. 一键设置SWAP大小"
     echo "q. 返回上级菜单"
     echo "===================="
 }
@@ -1121,7 +1122,85 @@ ask_reboot() {
     fi
 }
 
+# SWAP 设置菜单
+set_swap_menu() {
 
+    echo "========================="
+    echo "     SWAP 大小设置"
+    echo "========================="
+    echo "1. 500MB"
+    echo "2. 1GB"
+    echo "3. 2GB"
+    echo "4. 5GB"
+    echo "5. 自定义大小(MB)"
+    echo "========================="
+
+    read -p "请选择: " swap_choice
+
+    case $swap_choice in
+
+        1)
+            swap_size_mb=500
+            ;;
+
+        2)
+            swap_size_mb=1024
+            ;;
+
+        3)
+            swap_size_mb=2048
+            ;;
+
+        4)
+            swap_size_mb=5120
+            ;;
+
+        5)
+            read -p "请输入SWAP大小(MB): " swap_size_mb
+
+            if ! [[ "$swap_size_mb" =~ ^[0-9]+$ ]]; then
+                echo "请输入正确的数字"
+                return 1
+            fi
+            ;;
+
+        *)
+            echo "无效选项"
+            return 1
+            ;;
+    esac
+
+    echo "准备设置 ${swap_size_mb}MB SWAP..."
+
+    # 关闭旧 SWAP
+    swapoff -a 2>/dev/null
+
+    # 删除旧配置
+    sed -i '/\/swapfile/d' /etc/fstab
+
+    # 删除旧文件
+    rm -f /swapfile
+
+    # 创建 SWAP 文件
+    fallocate -l ${swap_size_mb}M /swapfile
+
+    # fallocate 失败兼容处理
+    if [ $? -ne 0 ]; then
+        dd if=/dev/zero of=/swapfile bs=1M count=$swap_size_mb
+    fi
+
+    chmod 600 /swapfile
+
+    mkswap /swapfile
+
+    swapon /swapfile
+
+    echo '/swapfile swap swap defaults 0 0' >> /etc/fstab
+
+    echo "SWAP 设置完成"
+
+    free -h
+}
 
 # 主循环
 while true
@@ -1174,6 +1253,8 @@ do
                         ;;
                     14) show_login_ips;;
                     15) show_timezone;;
+                    16) set_swap_menu
+                        ;;
                     q)
                         break
                         ;;
