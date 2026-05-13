@@ -809,10 +809,75 @@ sync_shanghai_time() {
 
 # 一键修改 SSH 端口
 change_ssh_port() {
+
     read -p "请输入新的 SSH 端口: " new_port
-    sed -i "s/Port [0-9]*/Port $new_port/" /etc/ssh/sshd_config
-    systemctl restart sshd
-    echo "SSH 端口已修改为 $new_port"
+
+    # 检查端口是否合法
+    if ! [[ "$new_port" =~ ^[0-9]+$ ]]; then
+        echo "端口必须是数字"
+        return 1
+    fi
+
+    if [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; then
+        echo "端口范围必须在 1-65535"
+        return 1
+    fi
+
+    SSH_CONFIG="/etc/ssh/sshd_config"
+
+    # 备份配置
+    cp "$SSH_CONFIG" "${SSH_CONFIG}.bak"
+
+    # 删除所有 Port 配置（包含注释）
+    sed -i '/^#\?Port /d' "$SSH_CONFIG"
+
+    # 写入新的 SSH 端口
+    echo "Port $new_port" >> "$SSH_CONFIG"
+
+    # 检测 SSH 配置是否正确
+    if ! sshd -t 2>/dev/null; then
+
+        echo "SSH 配置检测失败，正在恢复原配置..."
+
+        cp "${SSH_CONFIG}.bak" "$SSH_CONFIG"
+
+        return 1
+    fi
+
+    # 自动放行 UFW
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow "$new_port"/tcp >/dev/null 2>&1
+    fi
+
+    # 自动放行 firewalld
+    if command -v firewall-cmd >/dev/null 2>&1; then
+        firewall-cmd --permanent --add-port=${new_port}/tcp >/dev/null 2>&1
+        firewall-cmd --reload >/dev/null 2>&1
+    fi
+
+    echo "SSH 端口已修改为: $new_port"
+
+    # 是否重启 SSH
+    read -p "是否立即重启 SSH 服务？(y/n): " restart_confirm
+
+    if [[ "$restart_confirm" =~ ^[Yy]$ ]]; then
+
+        if systemctl list-unit-files | grep -q '^sshd.service'; then
+            systemctl restart sshd
+        else
+            systemctl restart ssh
+        fi
+
+        echo "SSH 服务已重启"
+        echo "请使用新端口连接:"
+        echo "ssh -p $new_port 用户名@服务器IP"
+
+    else
+
+        echo "已取消重启 SSH 服务"
+        echo "配置已保存，重启 SSH 后生效"
+
+    fi
 }
 
 # 函数：一键修改DNS1和DNS2
