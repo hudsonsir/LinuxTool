@@ -1755,16 +1755,41 @@ change_ssh_port() {
     # 备份配置
     sudo cp "$SSH_CONFIG" "${SSH_CONFIG}.bak" 2>/dev/null
 
-    # ── 核心修复逻辑 ───────────────────────────────────────
+    # ── 1. 修改传统 sshd_config 配置文件 ───────────────────
     if grep -q "^Port " "$SSH_CONFIG"; then
-        # 1. 如果存在已经生效的 Port 行，直接原地修改
         sudo sed -i "s/^Port .*/Port $new_port/g" "$SSH_CONFIG"
     elif grep -q "^#\s*Port " "$SSH_CONFIG"; then
-        # 2. 如果只有被注释的 #Port 行，则取消注释并修改（兼容 #Port 和 # Port 格式）
         sudo sed -i "s/^#\s*Port .*/Port $new_port/g" "$SSH_CONFIG"
     else
-        # 3. 兜底：如果完全没有 Port 关键字，则在末尾追加
         echo "Port $new_port" | sudo tee -a "$SSH_CONFIG" > /dev/null
+    fi
+
+    # ── 2. 核心修复：检测并处理 Systemd Socket 模式 ─────────
+    local use_socket=0
+    local socket_name=""
+
+    if systemctl is-active --quiet ssh.socket; then
+        use_socket=1
+        socket_name="ssh.socket"
+    elif systemctl is-active --quiet sshd.socket; then
+        use_socket=1
+        socket_name="sshd.socket"
+    fi
+
+    if [ $use_socket -eq 1 ]; then
+        echo -e "${YELLOW}检测到系统当前正在使用 Socket 模式管理 SSH (${socket_name})，正在进行兼容性配置...${RESET}"
+        
+        # 创建 Systemd 配置覆盖目录 (drop-in)
+        local dropin_dir="/etc/systemd/system/${socket_name}.d"
+        sudo mkdir -p "$dropin_dir"
+        
+        # 写入覆盖配置：必须先清空 ListenStream，再写入新端口
+        cat <<EOF | sudo tee "$dropin_dir/listen.conf" > /dev/null
+[Socket]
+ListenStream=
+ListenStream=$new_port
+EOF
+        echo "Systemd Socket 端口覆盖配置已生成。"
     fi
     # ──────────────────────────────────────────────────────
 
@@ -1772,6 +1797,9 @@ change_ssh_port() {
     if ! sudo sshd -t 2>/dev/null; then
         echo -e "${RED}SSH 配置检测失败，正在恢复原配置...${RESET}"
         sudo cp "${SSH_CONFIG}.bak" "$SSH_CONFIG"
+        if [ $use_socket -eq 1 ]; then
+            sudo rm -f "/etc/systemd/system/${socket_name}.d/listen.conf"
+        fi
         return 1
     fi
 
@@ -1786,23 +1814,37 @@ change_ssh_port() {
         sudo firewall-cmd --reload >/dev/null 2>&1
     fi
 
-    echo -e "${GREEN}✓ SSH 端口已成功修改为: $new_port${RESET}"
+    echo -e "${GREEN}✓ SSH 端口配置成功，新端口: $new_port${RESET}"
 
     # 是否重启 SSH
-    read -p "是否立即重启 SSH 服务？(y/n): " restart_confirm
+    read -p "是否立即重启 SSH 服务使配置生效？(y/n): " restart_confirm
 
     if [[ "$restart_confirm" =~ ^[Yy]$ ]]; then
-        if systemctl list-unit-files | grep -q '^sshd.service'; then
-            sudo systemctl restart sshd
+        if [ $use_socket -eq 1 ]; then
+            # Socket 模式下的重启流程
+            sudo systemctl daemon-reload
+            sudo systemctl restart "$socket_name"
+            # 顺便把常规服务重启一下，确保双保险
+            if systemctl list-unit-files | grep -q '^ssh.service'; then
+                sudo systemctl restart ssh
+            else
+                sudo systemctl restart sshd
+            fi
+            echo "Systemd 守护进程与 SSH Socket 已重载并重启"
         else
-            sudo systemctl restart ssh
+            # 传统模式下的重启流程
+            if systemctl list-unit-files | grep -q '^sshd.service'; then
+                sudo systemctl restart sshd
+            else
+                sudo systemctl restart ssh
+            fi
+            echo "SSH 常规服务已重启"
         fi
-        echo "SSH 服务已重启"
-        echo -e "${YELLOW}请使用新端口连接测试（切勿关闭当前终端窗口，防止配置错误导致失联）：${RESET}"
+        
+        echo -e "${YELLOW}请务必保留当前终端，并新开一个窗口测试连接：${RESET}"
         echo "ssh -p $new_port $(whoami)@$server_ip"
     else
-        echo "已取消重启 SSH 服务"
-        echo "配置已保存，重启 SSH 服务后生效"
+        echo "已取消重启，配置将在下次手动重启服务或重载 Systemd 后生效。"
     fi
 }
 
@@ -2625,7 +2667,7 @@ do
                     16) set_swap_menu
 
                         ;;
-                        
+
                     17) toggle_ipv6
                         ;;
 
