@@ -45,6 +45,50 @@ ensure_sudo() {
     echo "sudo 安装完成。"
 }
 
+# 获取服务器状态信息
+server_ip=$(hostname -I 2>/dev/null)
+uptime=$(uptime -p 2>/dev/null)
+uptime_cn=$(echo "$uptime" | sed 's/up/已运行/; s/hour/时/; s/minutes/分/; s/days/天/; s/months/月/')
+
+# 根据当前时间返回问候语
+get_greeting() {
+    local hour
+    hour=$(date +"%H")
+
+    case "$hour" in
+        1|2|3|4|5|6|7|8|9|10|11)
+            echo "上午好！欢迎使用Linux工具"
+            ;;
+        12|13|14|15|16|17|18)
+            echo "下午好！欢迎使用Linux工具"
+            ;;
+        *)
+            echo "晚上好！欢迎使用Linux工具"
+            ;;
+    esac
+}
+
+show_menu() {
+    clear
+    local greeting
+    greeting=$(get_greeting)
+
+    echo -e "
+===================================================
+✪  工具名称：${RED}Linux工具${RESET}            
+✪  服务器IP：$server_ip
+✪  运行时间：$uptime_cn
+--------------------[综合菜单]---------------------
+
+   1. 系统操作菜单(修改密码、SSH端口、更新系统等)
+   q. 退出脚本
+   u. 卸载脚本
+
+===================================================
+$greeting
+	"
+}
+
 # 系统操作菜单
 system_menu() {
     clear
@@ -68,6 +112,31 @@ system_menu() {
     echo "17. 一键开启/关闭IPv6"
     echo "q. 返回上级菜单"
     echo "===================="
+}
+
+# 卸载本地脚本
+uninstall_script() {
+    local script_path confirm
+
+    script_path="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+
+    echo "即将卸载本地脚本: $script_path"
+    read -p "确认删除该脚本及其备份文件吗？(y/N): " confirm
+    case "$confirm" in
+        y|Y|yes|YES)
+            rm -f "${script_path}.bak" 2>/dev/null
+            if rm -f "$script_path"; then
+                echo "脚本已成功卸载，再见！"
+                exit 0
+            else
+                echo "删除失败，请使用 sudo 重新运行后再试。"
+                return 1
+            fi
+            ;;
+        *)
+            echo "已取消卸载。"
+            ;;
+    esac
 }
 
 # 更新本地脚本
@@ -655,65 +724,83 @@ toggle_ipv6() {
 
 ensure_sudo
 
-# 主循环：直接进入系统操作菜单
+# 主循环
 while true; do
-    system_menu
-    read -p "请输入选项: " system_choice
-    case "$system_choice" in
+    show_menu
+    read -p "请输入选项: " choice
+    case "$choice" in
         1)
-            update_script
-            ;;
-        2)
-            change_password
-            ;;
-        3)
-            sync_shanghai_time
-            ;;
-        4)
-            change_ssh_port
-            ;;
-        5)
-            set_dns
-            ;;
-        6)
-            toggle_ssh
-            ;;
-        7)
-            update_centos
-            ;;
-        8)
-            update_ubuntu
-            ;;
-        9)
-            update_debian
-            ;;
-        10)
-            change_system_mirror
-            ;;
-        11)
-            create_user
-            ;;
-        12)
-            show_connected_ips_count
-            ;;
-        13)
-            change_hostname
-            ;;
-        14)
-            show_login_ips
-            ;;
-        15)
-            show_timezone
-            ;;
-        16)
-            set_swap_menu
-            ;;
-        17)
-            toggle_ipv6
+            while true; do
+                system_menu
+                read -p "请输入选项: " system_choice
+                case "$system_choice" in
+                    1)
+                        update_script
+                        ;;
+                    2)
+                        change_password
+                        ;;
+                    3)
+                        sync_shanghai_time
+                        ;;
+                    4)
+                        change_ssh_port
+                        ;;
+                    5)
+                        set_dns
+                        ;;
+                    6)
+                        toggle_ssh
+                        ;;
+                    7)
+                        update_centos
+                        ;;
+                    8)
+                        update_ubuntu
+                        ;;
+                    9)
+                        update_debian
+                        ;;
+                    10)
+                        change_system_mirror
+                        ;;
+                    11)
+                        create_user
+                        ;;
+                    12)
+                        show_connected_ips_count
+                        ;;
+                    13)
+                        change_hostname
+                        ;;
+                    14)
+                        show_login_ips
+                        ;;
+                    15)
+                        show_timezone
+                        ;;
+                    16)
+                        set_swap_menu
+                        ;;
+                    17)
+                        toggle_ipv6
+                        ;;
+                    q|Q)
+                        break
+                        ;;
+                    *)
+                        echo "无效的选项，请重新输入"
+                        ;;
+                esac
+                read -p "按回车键继续..."
+            done
             ;;
         q|Q)
             echo "再见！"
             break
+            ;;
+        u|U)
+            uninstall_script
             ;;
         *)
             echo "无效的选项，请重新输入"
