@@ -5,7 +5,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 RESET='\033[0m'
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 
 # 检测并自动安装 sudo（部分精简系统镜像默认未安装）
 ensure_sudo() {
@@ -869,7 +869,7 @@ hardware_info_check() {
         return 1
     fi
 
-    read -p "Select language [EN/cn], default EN: " lang_choice
+    read -p "请选择语言 [EN/cn]，默认 EN（直接回车为英文，输入 cn 为中文）: " lang_choice
     case "$lang_choice" in
         cn|CN|Cn|cN)
             lang_arg="-cn"
@@ -879,7 +879,7 @@ hardware_info_check() {
             ;;
     esac
 
-    read -p "Run disk I/O benchmark? [y/N]: " io_choice
+    read -p "是否运行磁盘 I/O 基准测试？[y/N]，默认不运行: " io_choice
     echo
     echo "正在启动硬件检测..."
     echo
