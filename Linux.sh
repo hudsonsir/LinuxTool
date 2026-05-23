@@ -117,7 +117,7 @@ system_menu() {
     render_menu_item 15 "$selected" "15. 查看当前服务器时区时间"
     render_menu_item 16 "$selected" "16. 一键设置SWAP大小"
     render_menu_item 17 "$selected" "17. 一键开启/关闭IPv6"
-    render_menu_item 18 "$selected" "18. 一键硬盘检测"
+    render_menu_item 18 "$selected" "18. 一键硬件检测"
     render_menu_item 19 "$selected" "q. 返回上级菜单"
     echo "===================="
     echo "使用 ↑/↓ 选择，回车确认；也可以直接输入数字或 q。"
@@ -845,206 +845,54 @@ toggle_ipv6() {
     fi
 }
 
-format_bytes() {
-    local bytes="$1"
+hardware_info_check() {
+    local self_path tmp_script lang_choice lang_arg io_choice
 
-    if [[ -z "$bytes" || ! "$bytes" =~ ^[0-9]+$ ]]; then
-        echo "未知"
-        return
-    fi
-
-    awk -v bytes="$bytes" 'BEGIN {
-        split("B KB MB GB TB PB", units, " ")
-        value = bytes
-        unit = 1
-        while (value >= 1024 && unit < 6) {
-            value = value / 1024
-            unit++
-        }
-        if (unit == 1) {
-            printf "%d %s", value, units[unit]
-        } else {
-            printf "%.2f %s", value, units[unit]
-        }
-    }'
-}
-
-detect_disk_bad_blocks() {
-    local smart_text="$1"
-    local reallocated pending offline_uncorrectable reported_uncorrect grown_defects non_medium total_bad
-
-    reallocated=$(echo "$smart_text" | awk 'tolower($0) ~ /reallocated_sector_ct/ {print $NF; exit}')
-    pending=$(echo "$smart_text" | awk 'tolower($0) ~ /current_pending_sector/ {print $NF; exit}')
-    offline_uncorrectable=$(echo "$smart_text" | awk 'tolower($0) ~ /offline_uncorrectable/ {print $NF; exit}')
-    reported_uncorrect=$(echo "$smart_text" | awk 'tolower($0) ~ /reported_uncorrect/ {print $NF; exit}')
-    grown_defects=$(echo "$smart_text" | awk 'tolower($0) ~ /elements in grown defect list/ {for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) value=$i; print value; exit}')
-    non_medium=$(echo "$smart_text" | awk 'tolower($0) ~ /non-medium error count/ {for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) value=$i; print value; exit}')
-
-    total_bad=0
-    [[ "$reallocated" =~ ^[0-9]+$ ]] && total_bad=$((total_bad + reallocated))
-    [[ "$pending" =~ ^[0-9]+$ ]] && total_bad=$((total_bad + pending))
-    [[ "$offline_uncorrectable" =~ ^[0-9]+$ ]] && total_bad=$((total_bad + offline_uncorrectable))
-
-    [[ "$reallocated" =~ ^[0-9]+$ ]] && echo "│   重映射扇区: $reallocated"
-    [[ "$pending" =~ ^[0-9]+$ ]] && echo "│   待处理扇区: $pending"
-    [[ "$offline_uncorrectable" =~ ^[0-9]+$ ]] && echo "│   离线不可校正: $offline_uncorrectable"
-    [[ "$reported_uncorrect" =~ ^[0-9]+$ ]] && echo "│   报告的不可校正: $reported_uncorrect"
-    [[ "$grown_defects" =~ ^[0-9]+$ ]] && echo "│   增长缺陷列表: $grown_defects"
-    [[ "$non_medium" =~ ^[0-9]+$ && "$non_medium" -gt 0 ]] && echo "│   非介质错误: $non_medium"
-
-    if [ "$total_bad" -gt 0 ]; then
-        echo -e "│   ${RED}坏块/风险扇区合计: $total_bad${RESET}"
-    elif [[ "$reallocated$pending$offline_uncorrectable" =~ [0-9] ]]; then
-        echo -e "│   ${GREEN}坏块/风险扇区合计: 0${RESET}"
-    fi
-}
-
-show_smart_for_disk() {
-    local disk="$1"
-    local smart_text health temperature power_hours percentage_used available_spare critical_warning
-
-    if ! command -v smartctl >/dev/null 2>&1; then
-        echo "│   SMART状态: smartctl未安装"
-        return
-    fi
-
-    smart_text=$(sudo smartctl -a "/dev/$disk" 2>/dev/null)
-    if [ -z "$smart_text" ]; then
-        echo "│   SMART状态: 无法读取"
-        return
-    fi
-
-    health=$(echo "$smart_text" | awk -F': ' '/SMART overall-health|SMART Health Status|SMART overall-health self-assessment/ {print $2; exit}')
-    [ -n "$health" ] && echo "│   SMART健康: $health"
-
-    temperature=$(echo "$smart_text" | awk '
-        /Temperature:/ {for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) {print $i; exit}}
-        /Temperature_Celsius/ {print $10; exit}
-        /Current Drive Temperature/ {for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) {print $i; exit}}
-    ')
-    [ -n "$temperature" ] && echo "│   温度: ${temperature}°C"
-
-    power_hours=$(echo "$smart_text" | awk '
-        /Power_On_Hours/ {print $10; exit}
-        /Accumulated power on time/ {for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) value=$i; print value; exit}
-        /number of hours powered up/ {for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) value=$i; print value; exit}
-    ')
-    [ -n "$power_hours" ] && echo "│   通电时间: ${power_hours} 小时"
-
-    if [[ "$disk" =~ ^nvme ]]; then
-        percentage_used=$(echo "$smart_text" | awk -F: '/Percentage Used/ {gsub(/[^0-9]/, "", $2); print $2; exit}')
-        available_spare=$(echo "$smart_text" | awk -F: '/Available Spare/ {gsub(/[^0-9]/, "", $2); print $2; exit}')
-        critical_warning=$(echo "$smart_text" | awk -F: '/Critical Warning/ {gsub(/^[ \t]+/, "", $2); print $2; exit}')
-        [ -n "$percentage_used" ] && echo "│   已使用耐久度: ${percentage_used}%"
-        [ -n "$available_spare" ] && echo "│   可用备用块: ${available_spare}%"
-        [ -n "$critical_warning" ] && echo "│   关键警告: $critical_warning"
-    fi
-
-    detect_disk_bad_blocks "$smart_text"
-}
-
-install_disk_check_tools() {
-    local missing=()
-
-    command -v smartctl >/dev/null 2>&1 || missing+=("smartmontools")
-    command -v lsblk >/dev/null 2>&1 || missing+=("util-linux")
-
-    if [ "${#missing[@]}" -eq 0 ]; then
-        return 0
-    fi
-
-    echo "检测到缺少工具: ${missing[*]}"
-    read -p "是否尝试自动安装？(y/N): " confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-        echo "已跳过安装，硬盘信息可能不完整。"
-        return 0
-    fi
-
-    if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update
-        sudo apt-get install -y "${missing[@]}"
-    elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y "${missing[@]}"
-    elif command -v yum >/dev/null 2>&1; then
-        sudo yum install -y "${missing[@]}"
-    elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -S --noconfirm "${missing[@]}"
-    elif command -v zypper >/dev/null 2>&1; then
-        sudo zypper install -y "${missing[@]}"
-    elif command -v apk >/dev/null 2>&1; then
-        sudo apk add "${missing[@]}"
-    else
-        echo "未识别包管理器，请手动安装: ${missing[*]}"
-        return 1
-    fi
-}
-
-disk_health_check() {
-    local disks=()
-    local disk size model vendor serial rota tran mount_info
+    self_path="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+    tmp_script="$(mktemp)"
 
     clear
-    echo "=== 一键硬盘检测 ==="
+    echo "=== 一键硬件检测 ==="
     echo "脚本来源: Yuri-NagaSaki/SICK"
     echo "项目地址: https://github.com/Yuri-NagaSaki/SICK"
     echo
 
-    install_disk_check_tools
-    echo
+    awk '
+        /^# __HARDWARE_INFO_SH_PAYLOAD_BEGIN__$/ {inside=1; next}
+        /^# __HARDWARE_INFO_SH_PAYLOAD_END__$/ {inside=0}
+        inside {print}
+    ' "$self_path" > "$tmp_script"
 
-    echo "=== 文件系统使用情况 ==="
-    df -h | grep -E '^/dev/' || echo "未检测到 /dev 文件系统挂载。"
-    echo
-
-    if ! command -v lsblk >/dev/null 2>&1; then
-        echo "lsblk 不可用，无法继续检测硬盘列表。"
+    if [ ! -s "$tmp_script" ]; then
+        echo "未能从当前 Linux.sh 中提取硬件检测模块。"
+        rm -f "$tmp_script"
         return 1
     fi
 
-    while IFS= read -r disk; do
-        [ -n "$disk" ] && disks+=("$disk")
-    done < <(lsblk -d -n -o NAME 2>/dev/null | grep -E '^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)$')
+    read -p "Select language [EN/cn], default EN: " lang_choice
+    case "$lang_choice" in
+        cn|CN|Cn|cN)
+            lang_arg="-cn"
+            ;;
+        *)
+            lang_arg="-us"
+            ;;
+    esac
 
-    if [ "${#disks[@]}" -eq 0 ]; then
-        echo "未检测到可识别的硬盘设备。"
-        return 1
+    read -p "Run disk I/O benchmark? [y/N]: " io_choice
+    echo
+    echo "正在启动硬件检测..."
+    echo
+
+    if [[ "$io_choice" =~ ^[Yy]$ ]]; then
+        bash "$tmp_script" "$lang_arg" --io-test
+    else
+        bash "$tmp_script" "$lang_arg"
     fi
+    local rc=$?
 
-    echo "=== 硬盘详情与健康状态 ==="
-    for disk in "${disks[@]}"; do
-        size=$(lsblk -d -n -o SIZE "/dev/$disk" 2>/dev/null | sed 's/^ *//')
-        model=$(lsblk -d -n -o MODEL "/dev/$disk" 2>/dev/null | sed 's/^ *//')
-        vendor=$(lsblk -d -n -o VENDOR "/dev/$disk" 2>/dev/null | sed 's/^ *//')
-        serial=$(lsblk -d -n -o SERIAL "/dev/$disk" 2>/dev/null | sed 's/^ *//')
-        rota=$(lsblk -d -n -o ROTA "/dev/$disk" 2>/dev/null | sed 's/^ *//')
-        tran=$(lsblk -d -n -o TRAN "/dev/$disk" 2>/dev/null | sed 's/^ *//')
-
-        echo "┌──────────────────────────────────────────────────"
-        echo "│ 设备: /dev/$disk"
-        echo "│ 容量: ${size:-未知}"
-        echo "│ 型号: ${vendor:-}${vendor:+ }${model:-未知}"
-        [ -n "$serial" ] && echo "│ 序列号: $serial"
-        [ -n "$tran" ] && echo "│ 接口: $tran"
-        if [ "$rota" = "1" ]; then
-            echo "│ 类型: HDD"
-        elif [ "$rota" = "0" ]; then
-            echo "│ 类型: SSD/NVMe"
-        fi
-
-        mount_info=$(lsblk -n -o NAME,MOUNTPOINT "/dev/$disk" 2>/dev/null | awk '$2 != "" {print "/dev/" $1 " -> " $2}')
-        if [ -n "$mount_info" ]; then
-            echo "│ 挂载:"
-            echo "$mount_info" | while IFS= read -r line; do
-                echo "│   $line"
-            done
-        fi
-
-        show_smart_for_disk "$disk"
-        echo "└──────────────────────────────────────────────────"
-        echo
-    done
-
-    echo -e "${GREEN}硬盘检测完成。${RESET}"
+    rm -f "$tmp_script"
+    return "$rc"
 }
 
 ensure_sudo
@@ -1141,7 +989,7 @@ while true; do
                         toggle_ipv6
                         ;;
                     18)
-                        disk_health_check
+                        hardware_info_check
                         ;;
                     q|Q)
                         break
@@ -1166,3 +1014,4067 @@ while true; do
     esac
     read -p "按回车键继续..."
 done
+
+exit 0
+
+# __HARDWARE_INFO_SH_PAYLOAD_BEGIN__
+#!/bin/bash
+
+# Hardware Information Collection Script
+# 硬件信息收集脚本
+# Compatible with Debian/Ubuntu/CentOS/AlmaLinux/Rocky Linux/CloudLinux/Arch Linux/openSUSE/Fedora/Alpine Linux
+# 兼容 Debian/Ubuntu/CentOS/AlmaLinux/Rocky Linux/CloudLinux/Arch Linux/openSUSE/Fedora/Alpine Linux
+
+VERSION="2.6.0"
+SCRIPT_NAME="Hardware Info Collector"
+
+# Temporary files tracking for cleanup
+TEMP_FILES=()
+
+# Caches to reduce repeated external calls
+SMARTCTL_SCAN_CACHE=""
+SMARTCTL_SCAN_DONE=false
+RAID_MEMBER_CACHE=""
+RAID_MEMBER_CACHE_READY=false
+declare -A SMART_JSON_CACHE
+declare -A SMART_JSON_CACHE_READY
+declare -A SMART_JSON_RAID_CACHE
+declare -A SMART_JSON_RAID_CACHE_READY
+declare -A DISPLAY_WIDTH_CACHE
+
+# JSON report data containers
+JSON_SYSTEM_KV=()
+JSON_CPU_KV=()
+JSON_RAM_KV=()
+JSON_RAM_MODULES=()
+JSON_DISKS=()
+JSON_RAID_SW=()
+JSON_RAID_HW=()
+JSON_RAID_CONTROLLERS=()
+JSON_NETWORK=()
+JSON_GPU=()
+JSON_MOTHERBOARD_KV=()
+JSON_IO_KV=()
+JSON_IO_MOUNTS=()
+JSON_DISK_SMART_KV=()
+DISK_JSON_EXTRA=()
+
+# Cleanup function for temporary files
+cleanup_temp_files() {
+    for tmp_file in "${TEMP_FILES[@]}"; do
+        [[ -f "$tmp_file" ]] && rm -f "$tmp_file"
+    done
+}
+
+# Set trap to cleanup on exit
+trap cleanup_temp_files EXIT
+
+# Color definitions
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+NC='\033[0m' 
+
+# Default language
+LANG_MODE="en"
+OUTPUT_MODE="text"
+RUN_IO_TEST=false
+IO_TEST_SIZE_MB=16
+
+# Language definitions
+declare -A LABELS_EN=(
+    ["title"]="System Hardware Information Report"
+    ["system_info"]="System Information"
+    ["cpu_info"]="CPU Information"
+    ["ram_info"]="Memory (RAM) Information"
+    ["disk_info"]="Disk Drive Information"
+    ["raid_info"]="RAID Controller Information"
+    ["network_info"]="Network Interface Information"
+    ["gpu_info"]="Graphics Card Information"
+    ["motherboard_info"]="Motherboard Information"
+    ["io_info"]="Disk I/O Capability"
+    ["hostname"]="Hostname"
+    ["os"]="Operating System"
+    ["kernel"]="Kernel Version"
+    ["uptime"]="System Uptime"
+    ["model"]="Model"
+    ["cores"]="Cores"
+    ["threads"]="Threads"
+    ["frequency"]="Frequency"
+    ["cache"]="Cache"
+    ["usage"]="Usage"
+    ["total"]="Total"
+    ["used"]="Used"
+    ["free"]="Free"
+    ["available"]="Available"
+    ["speed"]="Speed"
+    ["type"]="Type"
+    ["size"]="Size"
+    ["vendor"]="Vendor"
+    ["status"]="Status"
+    ["temperature"]="Temperature"
+    ["read_io"]="Read I/O"
+    ["write_io"]="Write I/O"
+    ["manufacturer"]="Manufacturer"
+    ["configured_speed"]="Configured Speed"
+    ["power_on_hours"]="Power On Hours"
+    ["total_reads"]="Total Reads"
+    ["total_writes"]="Total Writes"
+    ["health_status"]="Health Status"
+    ["smart_status"]="SMART Status"
+    ["wear_level"]="Remaining Lifetime"
+    ["driver"]="Driver"
+    ["resolution"]="Resolution"
+    ["memory"]="Memory"
+    ["duplex"]="Duplex"
+    ["link_detected"]="Link Detected"
+    ["model"]="Model"
+    ["frequency"]="Frequency"
+    ["serial_number"]="Serial Number"
+    ["no_info"]="No information available"
+    ["not_detected"]="Not detected"
+    ["generating"]="Generating hardware report..."
+    ["completed"]="Report generation completed!"
+    ["percentage_used"]="Percentage Used"
+    ["available_spare"]="Available Spare"
+    ["critical_warning"]="Critical Warning"
+    ["mac_address"]="MAC Address"
+    ["cpu_temperature"]="CPU Temperature"
+    ["core_temps"]="Core Temperatures"
+    ["cpu_temp_high"]="High Temperature Warning"
+    ["requires_root_sensors"]="Requires root/sensors"
+    ["reallocated_sectors"]="Reallocated Sectors"
+    ["pending_sectors"]="Pending Sectors"
+    ["offline_uncorrectable"]="Offline Uncorrectable"
+    ["reported_uncorrect"]="Reported Uncorrectable"
+    ["uncorrected_errors"]="Uncorrected Errors"
+    ["grown_defects"]="Grown Defect List"
+    ["non_medium_errors"]="Non-medium Errors"
+    ["bad_blocks"]="Bad Blocks"
+    ["fio_status"]="fio Status"
+    ["write_test"]="Read/Write Test"
+    ["mount_point"]="Mount Point"
+    ["filesystem"]="Filesystem"
+    ["local_disk"]="Local Disk"
+    ["writable"]="Writable"
+)
+
+declare -A LABELS_CN=(
+    ["title"]="系统硬件信息报告"
+    ["system_info"]="系统信息"
+    ["cpu_info"]="处理器信息"
+    ["ram_info"]="内存信息"
+    ["disk_info"]="硬盘信息"
+    ["raid_info"]="RAID控制器信息"
+    ["network_info"]="网卡信息"
+    ["gpu_info"]="显卡信息"
+    ["motherboard_info"]="主板信息"
+    ["io_info"]="磁盘 I/O 能力"
+    ["hostname"]="主机名"
+    ["os"]="操作系统"
+    ["kernel"]="内核版本"
+    ["uptime"]="运行时间"
+    ["model"]="型号"
+    ["cores"]="核心数"
+    ["threads"]="线程数"
+    ["frequency"]="频率"
+    ["cache"]="缓存"
+    ["usage"]="使用率"
+    ["total"]="总计"
+    ["used"]="已用"
+    ["free"]="空闲"
+    ["available"]="可用"
+    ["speed"]="速度"
+    ["type"]="类型"
+    ["size"]="大小"
+    ["vendor"]="厂商"
+    ["status"]="状态"
+    ["temperature"]="温度"
+    ["read_io"]="读取IO"
+    ["write_io"]="写入IO"
+    ["manufacturer"]="制造商"
+    ["configured_speed"]="配置速度"
+    ["power_on_hours"]="通电时间"
+    ["total_reads"]="总读取量"
+    ["total_writes"]="总写入量"
+    ["health_status"]="健康状态"
+    ["smart_status"]="SMART状态"
+    ["wear_level"]="剩余寿命"
+    ["driver"]="驱动程序"
+    ["resolution"]="分辨率"
+    ["memory"]="显存"
+    ["duplex"]="双工模式"
+    ["link_detected"]="链接检测"
+    ["model"]="型号"
+    ["frequency"]="频率"
+    ["serial_number"]="序列号"
+    ["no_info"]="无可用信息"
+    ["not_detected"]="未检测到"
+    ["generating"]="正在生成硬件报告..."
+    ["completed"]="报告生成完成！"
+    ["percentage_used"]="已使用耐久度"
+    ["available_spare"]="可用备用块"
+    ["critical_warning"]="关键警告"
+    ["mac_address"]="MAC地址"
+    ["cpu_temperature"]="CPU温度"
+    ["core_temps"]="核心温度"
+    ["cpu_temp_high"]="高温警告"
+    ["requires_root_sensors"]="需要root权限/sensors命令"
+    ["reallocated_sectors"]="重映射扇区"
+    ["pending_sectors"]="待处理扇区"
+    ["offline_uncorrectable"]="离线不可校正"
+    ["reported_uncorrect"]="报告的不可校正"
+    ["uncorrected_errors"]="未校正错误"
+    ["grown_defects"]="增长缺陷列表"
+    ["non_medium_errors"]="非介质错误"
+    ["bad_blocks"]="坏块统计"
+    ["fio_status"]="fio 状态"
+    ["write_test"]="读写测试"
+    ["mount_point"]="挂载点"
+    ["filesystem"]="文件系统"
+    ["local_disk"]="本地磁盘"
+    ["writable"]="可写"
+)
+
+# Function to get label based on current language
+get_label() {
+    local key="$1"
+    if [[ "$LANG_MODE" == "cn" ]]; then
+        echo "${LABELS_CN[$key]}"
+    else
+        echo "${LABELS_EN[$key]}"
+    fi
+}
+
+# Function to print colored output
+print_color() {
+    local color="$1"
+    local text="$2"
+    printf '%b\n' "${color}${text}${NC}"
+}
+
+# JSON helpers
+json_escape() {
+    local str="$1"
+    str=${str//\\/\\\\}
+    str=${str//\"/\\\"}
+    str=${str//$'\n'/\\n}
+    str=${str//$'\r'/\\r}
+    str=${str//$'\t'/\\t}
+    str=${str//$'\b'/\\b}
+    str=${str//$'\f'/\\f}
+    printf '%s' "$str"
+}
+
+json_value() {
+    local val="$1"
+    if [[ -z "$val" ]]; then
+        printf 'null'
+        return
+    fi
+    # JSON numbers cannot have leading zeros (except "0" or "0.xxx")
+    if [[ "$val" =~ ^-?(0|[1-9][0-9]*)(\.[0-9]+)?$ ]]; then
+        printf '%s' "$val"
+        return
+    fi
+    printf '"%s"' "$(json_escape "$val")"
+}
+
+json_kv() {
+    local key="$1"
+    local val="$2"
+    printf '"%s":%s' "$key" "$(json_value "$val")"
+}
+
+json_kv_raw() {
+    local key="$1"
+    local raw="$2"
+    printf '"%s":%s' "$key" "$raw"
+}
+
+json_join() {
+    local IFS=,
+    printf '%s' "$*"
+}
+
+json_obj() {
+    local items=("$@")
+    if [[ ${#items[@]} -eq 0 ]]; then
+        printf '{}'
+        return
+    fi
+    printf '{%s}' "$(json_join "${items[@]}")"
+}
+
+json_array() {
+    local items=("$@")
+    if [[ ${#items[@]} -eq 0 ]]; then
+        printf '[]'
+        return
+    fi
+    printf '[%s]' "$(json_join "${items[@]}")"
+}
+
+json_array_values() {
+    local out=()
+    local v=""
+    for v in "$@"; do
+        [[ -z "$v" ]] && continue
+        out+=("$(json_value "$v")")
+    done
+    json_array "${out[@]}"
+}
+
+json_reset() {
+    JSON_SYSTEM_KV=()
+    JSON_CPU_KV=()
+    JSON_RAM_KV=()
+    JSON_RAM_MODULES=()
+    JSON_DISKS=()
+    JSON_RAID_SW=()
+    JSON_RAID_HW=()
+    JSON_RAID_CONTROLLERS=()
+    JSON_NETWORK=()
+    JSON_GPU=()
+    JSON_MOTHERBOARD_KV=()
+    JSON_IO_KV=()
+    JSON_IO_MOUNTS=()
+    JSON_DISK_SMART_KV=()
+    DISK_JSON_EXTRA=()
+}
+
+disk_smart_reset() {
+    JSON_DISK_SMART_KV=()
+}
+
+disk_smart_add() {
+    local key="$1"
+    local val="$2"
+    [[ -z "$key" || -z "$val" ]] && return
+    JSON_DISK_SMART_KV+=("$(json_kv "$key" "$val")")
+}
+
+disk_extra_add() {
+    local key="$1"
+    local val="$2"
+    [[ -z "$key" || -z "$val" ]] && return
+    DISK_JSON_EXTRA+=("$(json_kv "$key" "$val")")
+}
+
+disk_json_add() {
+    local category="$1"
+    local name="$2"
+    local basic_info="$3"
+    local pairs=()
+
+    pairs+=("$(json_kv "category" "$category")")
+    pairs+=("$(json_kv "name" "$name")")
+    [[ -n "$basic_info" ]] && pairs+=("$(json_kv "basic_info" "$basic_info")")
+
+    if [[ ${#DISK_JSON_EXTRA[@]} -gt 0 ]]; then
+        pairs+=("${DISK_JSON_EXTRA[@]}")
+    fi
+    if [[ ${#JSON_DISK_SMART_KV[@]} -gt 0 ]]; then
+        pairs+=("$(json_kv_raw "smart" "$(json_obj "${JSON_DISK_SMART_KV[@]}")")")
+    fi
+
+    JSON_DISKS+=("$(json_obj "${pairs[@]}")")
+    DISK_JSON_EXTRA=()
+    JSON_DISK_SMART_KV=()
+}
+
+# Function to repeat a character N times without external commands
+repeat_char() {
+    local char="$1"
+    local count="$2"
+    local out=""
+
+    if [[ -z "$count" || "$count" -le 0 ]]; then
+        return
+    fi
+
+    printf -v out '%*s' "$count" ''
+    out=${out// /$char}
+    printf '%s' "$out"
+}
+
+# Function to print section header
+print_header() {
+    local title="$1"
+    local width=80
+    local padding=$(( (width - ${#title}) / 2 ))
+    
+    echo
+    print_color "$CYAN" "$(repeat_char '═' $width)"
+    print_color "$WHITE" "$(printf '%*s%s%*s' $padding '' "$title" $padding '')"
+    print_color "$CYAN" "$(repeat_char '═' $width)"
+    echo
+}
+
+# Function to print sub-section
+print_subsection() {
+    local title="$1"
+    local width=50
+    local title_width=$(get_display_width "$title")
+    local fill=$((width - title_width - 4))
+
+    [[ "$fill" -lt 1 ]] && fill=1
+    print_color "$YELLOW" "┌─ $title $(repeat_char '─' "$fill")"
+    print_color "$YELLOW" "├$(repeat_char '─' "$width")"
+}
+
+# Function to calculate display width of string (considering CJK characters)
+get_display_width() {
+    local str="$1"
+
+    if [[ ${DISPLAY_WIDTH_CACHE[$str]+_} ]]; then
+        echo "${DISPLAY_WIDTH_CACHE[$str]}"
+        return
+    fi
+
+    # Calculate display width for mixed ASCII/CJK strings
+    local byte_count=$(echo -n "$str" | wc -c)
+    local char_count=$(echo -n "$str" | wc -m)
+    local display_width=""
+
+    if [[ $byte_count -eq $char_count ]]; then
+        # All ASCII characters, display width = character count
+        display_width=$char_count
+    else
+        # Mixed or all CJK characters
+        # In UTF-8: ASCII=1 byte, CJK=3 bytes
+        # Let a=ascii_chars, c=cjk_chars
+        # a + c = char_count
+        # a + 3c = byte_count
+        # Solving: c = (byte_count - char_count) / 2
+        # display_width = a*1 + c*2 = char_count + c
+        local cjk_chars=$(( (byte_count - char_count) / 2 ))
+        display_width=$((char_count + cjk_chars))
+    fi
+
+    if (( ${#str} <= 64 )); then
+        DISPLAY_WIDTH_CACHE[$str]=$display_width
+    fi
+
+    echo "$display_width"
+}
+
+# Function to print info line with proper alignment
+print_info() {
+    local label="$1"
+    local value="$2"
+    local target_width=20
+    
+    # Calculate the actual display width of the label
+    local label_width=$(get_display_width "$label")
+    
+    # Calculate needed padding
+    local padding=$((target_width - label_width))
+    if [[ $padding -lt 0 ]]; then
+        padding=0
+    fi
+    
+    # Print with calculated padding
+    printf "│ %s%*s: %s\n" "$label" $padding "" "$value"
+}
+
+# Function to print table cell with proper alignment
+print_table_cell() {
+    local content="$1"
+    local width="$2"
+    local content_width=$(get_display_width "$content")
+    local padding=$((width - content_width))
+    
+    if [[ $padding -lt 0 ]]; then
+        padding=0
+    fi
+    
+    printf "%s%*s" "$content" $padding ""
+}
+
+# Function to print table header
+print_table_header() {
+    local cols=("$@")
+    local line="├"
+    local header="│"
+    
+    for col in "${cols[@]}"; do
+        line+="$(repeat_char '─' 18)┬"
+        header+="$(printf " %-16s │" "$col")"
+    done
+    
+    line="${line%┬}┤"
+    print_color "$YELLOW" "$line"
+    print_color "$WHITE" "$header"
+    
+    line="├"
+    for col in "${cols[@]}"; do
+        line+="$(repeat_char '─' 18)┼"
+    done
+    line="${line%┼}┤"
+    print_color "$YELLOW" "$line"
+}
+
+# Function to print table row
+print_table_row() {
+    local cols=("$@")
+    local row="│"
+    
+    for col in "${cols[@]}"; do
+        row+="$(printf " %-16s │" "$col")"
+    done
+    
+    echo "$row"
+}
+
+# Function to read a value from /etc/os-release without sourcing executable shell
+get_os_release_value() {
+    local key="$1"
+    local line=""
+    local value=""
+
+    [[ -r /etc/os-release ]] || return 1
+
+    while IFS= read -r line; do
+        [[ "$line" == "$key="* ]] || continue
+        value="${line#*=}"
+        case "$value" in
+            \"*\")
+                value="${value#\"}"
+                value="${value%\"}"
+                ;;
+            \'*\')
+                value="${value#\'}"
+                value="${value%\'}"
+                ;;
+        esac
+        printf '%s\n' "$value"
+        return 0
+    done < /etc/os-release
+
+    return 1
+}
+
+# Function to detect distribution
+detect_distro() {
+    if [[ -f /etc/os-release ]]; then
+        get_os_release_value "ID" || echo "unknown"
+    elif [[ -f /etc/redhat-release ]]; then
+        echo "centos"
+    elif [[ -f /etc/debian_version ]]; then
+        echo "debian"
+    elif [[ -f /etc/alpine-release ]]; then
+        echo "alpine"
+    elif [[ -f /etc/arch-release ]]; then
+        echo "arch"
+    elif [[ -f /etc/SuSE-release ]]; then
+        echo "opensuse"
+    else
+        echo "unknown"
+    fi
+}
+
+# Function to get package manager
+get_package_manager() {
+    local distro=$(detect_distro)
+    case "$distro" in
+        "ubuntu"|"debian"|"linuxmint")
+            echo "apt"
+            ;;
+        "centos"|"rhel"|"almalinux"|"rocky"|"cloudlinux")
+            if command -v dnf >/dev/null 2>&1; then
+                echo "dnf"
+            else
+                echo "yum"
+            fi
+            ;;
+        "fedora")
+            echo "dnf"
+            ;;
+        "arch"|"manjaro")
+            echo "pacman"
+            ;;
+        "opensuse"|"sles")
+            echo "zypper"
+            ;;
+        "alpine")
+            echo "apk"
+            ;;
+        *)
+            echo "unknown"
+            ;;
+    esac
+}
+
+# Function to install required packages
+install_packages() {
+    local pkg_manager=$(get_package_manager)
+    local packages_needed=()
+    local packages_installed=()
+    
+    # Check for required commands
+    echo "Checking for required tools..."
+    
+    if ! command -v dmidecode >/dev/null 2>&1; then
+        packages_needed+=("dmidecode")
+        echo "  ❌ dmidecode not found"
+    else
+        echo "  ✓ dmidecode found"
+    fi
+    
+    if ! command -v lshw >/dev/null 2>&1; then
+        packages_needed+=("lshw")
+        echo "  ❌ lshw not found"
+    else
+        echo "  ✓ lshw found"
+    fi
+    
+    if ! command -v smartctl >/dev/null 2>&1; then
+        packages_needed+=("smartmontools")
+        echo "  ❌ smartctl not found"
+    else
+        echo "  ✓ smartctl found"
+    fi
+    
+    if ! command -v iostat >/dev/null 2>&1; then
+        packages_needed+=("sysstat")
+        echo "  ❌ iostat not found"
+    else
+        echo "  ✓ iostat found"
+    fi
+    
+    if ! command -v bc >/dev/null 2>&1; then
+        packages_needed+=("bc")
+        echo "  ❌ bc not found"
+    else
+        echo "  ✓ bc found"
+    fi
+    
+    if ! command -v ethtool >/dev/null 2>&1; then
+        packages_needed+=("ethtool")
+        echo "  ❌ ethtool not found"
+    else
+        echo "  ✓ ethtool found"
+    fi
+    
+    if ! command -v nvme >/dev/null 2>&1; then
+        packages_needed+=("nvme-cli")
+        echo "  ❌ nvme not found"
+    else
+        echo "  ✓ nvme found"
+    fi
+
+    if ! command -v jq >/dev/null 2>&1; then
+        packages_needed+=("jq")
+        echo "  ❌ jq not found (for JSON parsing)"
+    else
+        echo "  ✓ jq found"
+    fi
+
+    if [[ "$RUN_IO_TEST" == true ]]; then
+        if ! is_fio_benchmark_available; then
+            packages_needed+=("fio")
+            echo "  ❌ fio not found (for disk I/O benchmark)"
+        else
+            echo "  ✓ fio found"
+        fi
+    fi
+
+    # Check for sensors command (for CPU temperature)
+    if ! command -v sensors >/dev/null 2>&1; then
+        case "$pkg_manager" in
+            apt)
+                packages_needed+=("lm-sensors")
+                echo "  ❌ sensors not found (for CPU temperature)"
+                ;;
+            yum|dnf)
+                packages_needed+=("lm_sensors")
+                echo "  ❌ sensors not found (for CPU temperature)"
+                ;;
+            pacman)
+                packages_needed+=("lm_sensors")
+                echo "  ❌ sensors not found (for CPU temperature)"
+                ;;
+            zypper)
+                packages_needed+=("sensors")
+                echo "  ❌ sensors not found (for CPU temperature)"
+                ;;
+            apk)
+                packages_needed+=("lm-sensors")
+                echo "  ❌ sensors not found (for CPU temperature)"
+                ;;
+            *)
+                echo "  ❌ sensors not found (package name varies by distro)"
+                ;;
+        esac
+    else
+        echo "  ✓ sensors found"
+    fi
+
+    # Check for optional but useful commands
+    if ! command -v lspci >/dev/null 2>&1; then
+        case "$pkg_manager" in
+            "apt")
+                packages_needed+=("pciutils")
+                echo "  ❌ lspci not found"
+                ;;
+            "dnf"|"yum")
+                packages_needed+=("pciutils")
+                echo "  ❌ lspci not found"
+                ;;
+            "pacman")
+                packages_needed+=("pciutils")
+                echo "  ❌ lspci not found"
+                ;;
+            "zypper")
+                packages_needed+=("pciutils")
+                echo "  ❌ lspci not found"
+                ;;
+            "apk")
+                packages_needed+=("pciutils")
+                echo "  ❌ lspci not found"
+                ;;
+        esac
+    else
+        echo "  ✓ lspci found"
+    fi
+    
+    if [[ ${#packages_needed[@]} -eq 0 ]]; then
+        echo "All required tools are already installed!"
+        echo
+        return 0
+    fi
+    
+    echo
+    if [[ "$LANG_MODE" == "cn" ]]; then
+        echo "需要安装以下软件包: ${packages_needed[*]}"
+    else
+        echo "Need to install the following packages: ${packages_needed[*]}"
+    fi
+    
+    # Check if we have permission to install packages
+    if ! command -v sudo >/dev/null 2>&1 && [[ $EUID -ne 0 ]]; then
+        if [[ "$LANG_MODE" == "cn" ]]; then
+            echo "❌ 错误: 没有sudo权限且不是root用户，无法自动安装软件包"
+            echo "请手动安装以下软件包: ${packages_needed[*]}"
+            echo "然后重新运行此脚本。"
+        else
+            echo "❌ Error: No sudo access and not running as root, cannot auto-install packages"
+            echo "Please manually install the following packages: ${packages_needed[*]}"
+            echo "Then run this script again."
+        fi
+        echo
+        return 1
+    fi
+    
+    local install_cmd=()
+    local update_cmd=()
+    
+    case "$pkg_manager" in
+        "apt")
+            update_cmd=(sudo apt-get update)
+            install_cmd=(sudo apt-get install -y)
+            ;;
+        "dnf")
+            install_cmd=(sudo dnf install -y)
+            ;;
+        "yum")
+            install_cmd=(sudo yum install -y)
+            ;;
+        "pacman")
+            install_cmd=(sudo pacman -S --noconfirm)
+            ;;
+        "zypper")
+            install_cmd=(sudo zypper install -y)
+            ;;
+        "apk")
+            install_cmd=(sudo apk add)
+            ;;
+        "unknown")
+            if [[ "$LANG_MODE" == "cn" ]]; then
+                echo "❌ 错误: 无法识别包管理器，请手动安装: ${packages_needed[*]}"
+            else
+                echo "❌ Error: Cannot detect package manager, please install manually: ${packages_needed[*]}"
+            fi
+            echo
+            return 1
+            ;;
+    esac
+    
+    if [[ $EUID -eq 0 ]]; then
+        # Running as root, remove sudo from commands
+        if [[ ${#update_cmd[@]} -gt 0 && "${update_cmd[0]}" == "sudo" ]]; then
+            update_cmd=("${update_cmd[@]:1}")
+        fi
+        if [[ ${#install_cmd[@]} -gt 0 && "${install_cmd[0]}" == "sudo" ]]; then
+            install_cmd=("${install_cmd[@]:1}")
+        fi
+    fi
+
+    # Update package list for apt-based systems
+    if [[ ${#update_cmd[@]} -gt 0 ]]; then
+        if [[ "$LANG_MODE" == "cn" ]]; then
+            echo "正在更新软件包列表..."
+        else
+            echo "Updating package list..."
+        fi
+        
+        if ! "${update_cmd[@]}" >/dev/null 2>&1; then
+            if [[ "$LANG_MODE" == "cn" ]]; then
+                echo "⚠️  警告: 软件包列表更新失败，继续安装..."
+            else
+                echo "⚠️  Warning: Package list update failed, continuing with installation..."
+            fi
+        fi
+    fi
+    
+    # Install packages
+    if [[ "$LANG_MODE" == "cn" ]]; then
+        echo "正在安装软件包..."
+    else
+        echo "Installing packages..."
+    fi
+    
+    local all_success=true
+    
+    for package in "${packages_needed[@]}"; do
+        echo "  Installing $package..."
+        if "${install_cmd[@]}" "$package" >/dev/null 2>&1; then
+            echo "  ✓ $package installed successfully"
+            packages_installed+=("$package")
+        else
+            echo "  ❌ Failed to install $package"
+            all_success=false
+        fi
+    done
+    
+    echo
+    
+    # Verify installation by checking commands again
+    if [[ "$LANG_MODE" == "cn" ]]; then
+        echo "验证安装结果..."
+    else
+        echo "Verifying installation..."
+    fi
+    
+    local verification_success=true
+    
+    # Re-check all commands
+    if [[ " ${packages_needed[*]} " =~ " dmidecode " ]]; then
+        if command -v dmidecode >/dev/null 2>&1; then
+            echo "  ✓ dmidecode now available"
+        else
+            echo "  ❌ dmidecode still not available"
+            verification_success=false
+        fi
+    fi
+    
+    if [[ " ${packages_needed[*]} " =~ " lshw " ]]; then
+        if command -v lshw >/dev/null 2>&1; then
+            echo "  ✓ lshw now available"
+        else
+            echo "  ❌ lshw still not available"
+            verification_success=false
+        fi
+    fi
+    
+    if [[ " ${packages_needed[*]} " =~ " smartmontools " ]]; then
+        if command -v smartctl >/dev/null 2>&1; then
+            echo "  ✓ smartctl now available"
+        else
+            echo "  ❌ smartctl still not available"
+            verification_success=false
+        fi
+    fi
+    
+    if [[ " ${packages_needed[*]} " =~ " sysstat " ]]; then
+        if command -v iostat >/dev/null 2>&1; then
+            echo "  ✓ iostat now available"
+        else
+            echo "  ❌ iostat still not available"
+            verification_success=false
+        fi
+    fi
+    
+    if [[ " ${packages_needed[*]} " =~ " bc " ]]; then
+        if command -v bc >/dev/null 2>&1; then
+            echo "  ✓ bc now available"
+        else
+            echo "  ❌ bc still not available"
+            verification_success=false
+        fi
+    fi
+    
+    if [[ " ${packages_needed[*]} " =~ " ethtool " ]]; then
+        if command -v ethtool >/dev/null 2>&1; then
+            echo "  ✓ ethtool now available"
+        else
+            echo "  ❌ ethtool still not available"
+            verification_success=false
+        fi
+    fi
+    
+    if [[ " ${packages_needed[*]} " =~ " pciutils " ]]; then
+        if command -v lspci >/dev/null 2>&1; then
+            echo "  ✓ lspci now available"
+        else
+            echo "  ❌ lspci still not available"
+            verification_success=false
+        fi
+    fi
+    
+    if [[ " ${packages_needed[*]} " =~ " nvme-cli " ]]; then
+        if command -v nvme >/dev/null 2>&1; then
+            echo "  ✓ nvme now available"
+        else
+            echo "  ❌ nvme still not available"
+            verification_success=false
+        fi
+    fi
+
+    if [[ " ${packages_needed[*]} " =~ " jq " ]]; then
+        if command -v jq >/dev/null 2>&1; then
+            echo "  ✓ jq now available"
+        else
+            echo "  ❌ jq still not available"
+            verification_success=false
+        fi
+    fi
+
+    if [[ " ${packages_needed[*]} " =~ " fio " ]]; then
+        if is_fio_benchmark_available; then
+            echo "  ✓ fio now available"
+        else
+            echo "  ❌ fio still not available"
+            verification_success=false
+        fi
+    fi
+
+    if [[ " ${packages_needed[*]} " =~ " lm-sensors " ]] || [[ " ${packages_needed[*]} " =~ " lm_sensors " ]] || [[ " ${packages_needed[*]} " =~ " sensors " ]]; then
+        if command -v sensors >/dev/null 2>&1; then
+            echo "  ✓ sensors now available"
+            # Try to detect sensors if just installed
+            if command -v sensors-detect >/dev/null 2>&1 && [[ $EUID -eq 0 ]]; then
+                echo "  Detecting sensors..."
+                yes "" | sensors-detect >/dev/null 2>&1 || true
+            fi
+        else
+            echo "  ❌ sensors still not available"
+            verification_success=false
+        fi
+    fi
+
+    echo
+    
+    if [[ "$all_success" == true && "$verification_success" == true ]]; then
+        if [[ "$LANG_MODE" == "cn" ]]; then
+            echo "✅ 所有软件包安装成功！"
+        else
+            echo "✅ All packages installed successfully!"
+        fi
+        echo
+        return 0
+    else
+        if [[ "$LANG_MODE" == "cn" ]]; then
+            echo "⚠️  警告: 某些软件包安装可能失败。硬件信息可能不完整。"
+            echo "请检查上述错误并手动安装失败的软件包。"
+        else
+            echo "⚠️  Warning: Some packages may have failed to install. Hardware information may be incomplete."
+            echo "Please check the errors above and manually install any failed packages."
+        fi
+        echo
+        return 1
+    fi
+}
+
+# Function to get system information
+get_system_info() {
+    print_subsection "$(get_label "system_info")"
+
+    local hostname_val=""
+    local os_val=""
+    local kernel_val=""
+    local uptime_val=""
+
+    hostname_val=$(hostname)
+    os_val=$(get_os_release_value "PRETTY_NAME" 2>/dev/null)
+    [[ -z "$os_val" ]] && os_val="$(get_label "no_info")"
+    kernel_val=$(uname -r)
+    uptime_val=$(uptime -p 2>/dev/null || uptime | cut -d',' -f1 | sed 's/.*up //')
+
+    print_info "$(get_label "hostname")" "$hostname_val"
+    print_info "$(get_label "os")" "$os_val"
+    print_info "$(get_label "kernel")" "$kernel_val"
+    print_info "$(get_label "uptime")" "$uptime_val"
+
+    JSON_SYSTEM_KV=(
+        "$(json_kv "hostname" "$hostname_val")"
+        "$(json_kv "os" "$os_val")"
+        "$(json_kv "kernel" "$kernel_val")"
+        "$(json_kv "uptime" "$uptime_val")"
+    )
+    
+    echo "└$(repeat_char '─' 50)"
+}
+
+# Function to detect CPU temperature
+get_cpu_temperature() {
+    local temp_found=false
+    local cpu_temps=""
+    local max_temp=0
+    local temp_data=""
+
+    # Method 1: Try using sensors command (lm-sensors)
+    if command -v sensors >/dev/null 2>&1; then
+        local sensors_output=$(sensors 2>/dev/null)
+
+        # Priority 1: Intel CPU - look for "Package id X" (whole CPU package temperature)
+        # Note: may have leading spaces, so don't use ^
+        local pkg_line=$(echo "$sensors_output" | grep -E "Package id [0-9]+:" | head -1)
+        if [[ -n "$pkg_line" ]]; then
+            local temp_part=$(echo "$pkg_line" | sed 's/(.*//')
+            local pkg_temp=$(echo "$temp_part" | grep -oE "[+-]?[0-9]+\.?[0-9]*" | tail -1)
+            if [[ -n "$pkg_temp" ]]; then
+                temp_found=true
+                temp_data="${pkg_temp}°C"
+            fi
+        fi
+
+        # Priority 2: AMD CPU - look for Tctl/Tdie (k10temp driver)
+        if [[ -z "$temp_data" ]]; then
+            local amd_line=$(echo "$sensors_output" | grep -E "Tctl:|Tdie:" | head -1)
+            if [[ -n "$amd_line" ]]; then
+                local temp_part=$(echo "$amd_line" | sed 's/(.*//')
+                local amd_temp=$(echo "$temp_part" | grep -oE "[+-]?[0-9]+\.?[0-9]*" | tail -1)
+                if [[ -n "$amd_temp" ]]; then
+                    temp_found=true
+                    temp_data="${amd_temp}°C"
+                fi
+            fi
+        fi
+
+        # Priority 3: Generic CPU temperature patterns
+        if [[ -z "$temp_data" ]]; then
+            local generic_line=$(echo "$sensors_output" | grep -iE "cpu.*temp|cpu:" | head -1)
+            if [[ -n "$generic_line" ]]; then
+                local temp_part=$(echo "$generic_line" | sed 's/(.*//')
+                local generic_temp=$(echo "$temp_part" | grep -oE "[+-]?[0-9]+\.?[0-9]*" | tail -1)
+                if [[ -n "$generic_temp" ]]; then
+                    temp_found=true
+                    temp_data="${generic_temp}°C"
+                fi
+            fi
+        fi
+    fi
+
+    # Method 2: Check thermal zones in /sys/class/thermal
+    if [[ "$temp_found" == false ]]; then
+        for zone in /sys/class/thermal/thermal_zone*/temp; do
+            if [[ -r "$zone" ]]; then
+                local zone_temp=$(cat "$zone" 2>/dev/null)
+                local zone_type_file="${zone%/temp}/type"
+                local zone_type="unknown"
+
+                if [[ -r "$zone_type_file" ]]; then
+                    zone_type=$(cat "$zone_type_file" 2>/dev/null)
+                fi
+
+                # Check if this is a CPU-related thermal zone
+                if [[ "$zone_type" =~ (cpu|x86_pkg_temp|CPU|Core|Package) ]]; then
+                    if [[ "$zone_temp" =~ ^[0-9]+$ && "$zone_temp" -gt 0 ]]; then
+                        # Convert millidegree to degree Celsius
+                        local temp_celsius=$(echo "scale=1; $zone_temp / 1000" | bc -l 2>/dev/null)
+                        if [[ -n "$temp_celsius" ]]; then
+                            temp_found=true
+                            temp_data="${temp_celsius}°C (${zone_type})"
+                            break
+                        fi
+                    fi
+                fi
+            fi
+        done
+    fi
+
+    # Method 3: Check hwmon interfaces
+    if [[ "$temp_found" == false ]]; then
+        for hwmon in /sys/class/hwmon/hwmon*/; do
+            if [[ -r "${hwmon}name" ]]; then
+                local hwmon_name=$(cat "${hwmon}name" 2>/dev/null)
+
+                # Check if this is CPU-related
+                if [[ "$hwmon_name" =~ (coretemp|k10temp|k8temp|fam15h_power|cpu) ]]; then
+                    # Look for temperature inputs
+                    for temp_input in "${hwmon}"temp*_input; do
+                        if [[ -r "$temp_input" ]]; then
+                            local temp_val=$(cat "$temp_input" 2>/dev/null)
+                            if [[ "$temp_val" =~ ^[0-9]+$ && "$temp_val" -gt 0 ]]; then
+                                # Convert millidegree to degree Celsius
+                                local temp_celsius=$(echo "scale=1; $temp_val / 1000" | bc -l 2>/dev/null)
+
+                                # Get label if available
+                                local temp_label_file="${temp_input%_input}_label"
+                                local temp_label=""
+                                if [[ -r "$temp_label_file" ]]; then
+                                    temp_label=$(cat "$temp_label_file" 2>/dev/null)
+                                fi
+
+                                if [[ -n "$temp_celsius" ]]; then
+                                    temp_found=true
+                                    if [[ -n "$temp_label" ]]; then
+                                        temp_data="${temp_celsius}°C (${temp_label})"
+                                    else
+                                        temp_data="${temp_celsius}°C"
+                                    fi
+                                    break 2
+                                fi
+                            fi
+                        fi
+                    done
+                fi
+            fi
+        done
+    fi
+
+    # Method 4: Try using vcgencmd for Raspberry Pi
+    if [[ "$temp_found" == false ]] && command -v vcgencmd >/dev/null 2>&1; then
+        local pi_temp=$(vcgencmd measure_temp 2>/dev/null | grep -oE "[0-9]+\.?[0-9]*")
+        if [[ -n "$pi_temp" ]]; then
+            temp_found=true
+            temp_data="${pi_temp}°C (Raspberry Pi)"
+        fi
+    fi
+
+    # Return the result
+    if [[ "$temp_found" == true ]]; then
+        echo "$temp_data"
+    else
+        echo ""
+    fi
+}
+
+# Function to get CPU information
+get_cpu_info() {
+    print_subsection "$(get_label "cpu_info")"
+
+    local cpu_model="" cpu_cores="" cpu_threads="" cpu_freq="" cpu_cache=""
+    IFS=$'\t' read -r cpu_model cpu_cores cpu_freq cpu_cache cpu_threads < <(
+        awk -F: '
+            /^model name[[:space:]]*:/ && !model {sub(/^[[:space:]]+/, "", $2); model=$2}
+            /^cpu cores[[:space:]]*:/ && !cores {sub(/^[[:space:]]+/, "", $2); cores=$2}
+            /^cpu MHz[[:space:]]*:/ && !freq {sub(/^[[:space:]]+/, "", $2); freq=$2}
+            /^cache size[[:space:]]*:/ && !cache {sub(/^[[:space:]]+/, "", $2); cache=$2}
+            /^processor[[:space:]]*:/ {threads++}
+            END {print model "\t" cores "\t" freq "\t" cache "\t" threads}
+        ' /proc/cpuinfo 2>/dev/null
+    )
+
+    print_info "$(get_label "model")" "${cpu_model:-$(get_label "no_info")}"
+    print_info "$(get_label "cores")" "${cpu_cores:-$(get_label "no_info")}"
+    print_info "$(get_label "threads")" "${cpu_threads:-$(get_label "no_info")}"
+    print_info "$(get_label "frequency")" "${cpu_freq:+${cpu_freq} MHz}"
+    print_info "$(get_label "cache")" "${cpu_cache:-$(get_label "no_info")}"
+
+    # CPU usage - using /proc/stat for more reliable detection
+    local cpu_usage=""
+    if [[ -r /proc/stat ]]; then
+        # Read CPU stats twice with a short interval
+        local user1="" nice1="" system1="" idle1="" iowait1="" irq1="" softirq1=""
+        local user2="" nice2="" system2="" idle2="" iowait2="" irq2="" softirq2=""
+        read -r _ user1 nice1 system1 idle1 iowait1 irq1 softirq1 _ < /proc/stat
+        sleep 0.2
+        read -r _ user2 nice2 system2 idle2 iowait2 irq2 softirq2 _ < /proc/stat
+
+        # Calculate differences
+        local user_diff=$((user2 - user1))
+        local nice_diff=$((nice2 - nice1))
+        local system_diff=$((system2 - system1))
+        local idle_diff=$((idle2 - idle1))
+        local iowait_diff=$((iowait2 - iowait1))
+        local irq_diff=$((irq2 - irq1))
+        local softirq_diff=$((softirq2 - softirq1))
+
+        local total_diff=$((user_diff + nice_diff + system_diff + idle_diff + iowait_diff + irq_diff + softirq_diff))
+        local active_diff=$((total_diff - idle_diff - iowait_diff))
+
+        if [[ $total_diff -gt 0 ]]; then
+            cpu_usage=$(echo "scale=1; $active_diff * 100 / $total_diff" | bc -l 2>/dev/null)
+        fi
+    fi
+
+    # Fallback to top if /proc/stat method fails
+    if [[ -z "$cpu_usage" ]]; then
+        cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | sed 's/%us,//' 2>/dev/null)
+    fi
+    local cpu_usage_val=""
+    if [[ -n "$cpu_usage" ]]; then
+        cpu_usage_val="${cpu_usage}%"
+    fi
+    print_info "$(get_label "usage")" "$cpu_usage_val"
+
+    # CPU Temperature
+    local cpu_temp=$(get_cpu_temperature)
+    if [[ -n "$cpu_temp" ]]; then
+        # Check if temperature is high (above 80°C is generally considered high)
+        local temp_value=$(echo "$cpu_temp" | grep -oE "[0-9]+\.?[0-9]*" | head -1)
+        if [[ -n "$temp_value" ]] && (( $(echo "$temp_value > 80" | bc -l 2>/dev/null || echo 0) )); then
+            # High temperature warning - print with color directly
+            printf "│ %-20s: ${RED}%s ⚠${NC}\n" "$(get_label "cpu_temperature")" "$cpu_temp"
+        else
+            print_info "$(get_label "cpu_temperature")" "$cpu_temp"
+        fi
+    else
+        # If no temperature detected, show message based on permissions
+        if [[ $EUID -ne 0 ]]; then
+            print_info "$(get_label "cpu_temperature")" "$(get_label "requires_root_sensors")"
+        else
+            print_info "$(get_label "cpu_temperature")" "$(get_label "not_detected")"
+        fi
+    fi
+
+    JSON_CPU_KV=(
+        "$(json_kv "model" "${cpu_model:-$(get_label "no_info")}")"
+        "$(json_kv "cores" "${cpu_cores:-$(get_label "no_info")}")"
+        "$(json_kv "threads" "${cpu_threads:-$(get_label "no_info")}")"
+        "$(json_kv "frequency" "${cpu_freq:+${cpu_freq} MHz}")"
+        "$(json_kv "cache" "${cpu_cache:-$(get_label "no_info")}")"
+        "$(json_kv "usage" "$cpu_usage_val")"
+        "$(json_kv "temperature" "$cpu_temp")"
+    )
+
+    echo "└$(repeat_char '─' 50)"
+}
+
+# Function to get RAM information
+get_ram_info() {
+    print_subsection "$(get_label "ram_info")"
+    
+    # Memory from /proc/meminfo
+    local mem_total="" mem_available=""
+    IFS=$'\t' read -r mem_total mem_available < <(
+        awk '
+            /MemTotal/ {total=$2}
+            /MemAvailable/ {avail=$2}
+            END {printf "%.2f GB\t%.2f GB", total/1024/1024, avail/1024/1024}
+        ' /proc/meminfo 2>/dev/null
+    )
+    local mem_used=$(free -h | grep Mem | awk '{print $3}')
+
+    print_info "$(get_label "total")" "$mem_total"
+    print_info "$(get_label "used")" "$mem_used"
+    print_info "$(get_label "available")" "$mem_available"
+
+    JSON_RAM_KV=(
+        "$(json_kv "total" "$mem_total")"
+        "$(json_kv "used" "$mem_used")"
+        "$(json_kv "available" "$mem_available")"
+    )
+    JSON_RAM_MODULES=()
+    
+    # Memory modules information
+    echo "│"
+    print_color "$GREEN" "│ Memory Modules:"
+    
+    if command -v dmidecode >/dev/null 2>&1 && [[ $EUID -eq 0 ]]; then
+        # Define column widths
+        local w1=8 w2=6 w3=12 w4=12 w5=15 w6=20
+        
+        # Print enhanced table header with proper alignment
+        echo "├$(repeat_char '─' 100)┤"
+        printf "│ "
+        print_table_cell "$(get_label "size")" $w1
+        printf " │ "
+        print_table_cell "$(get_label "type")" $w2
+        printf " │ "
+        print_table_cell "$(get_label "frequency")" $w3
+        printf " │ "
+        print_table_cell "$(get_label "manufacturer")" $w4
+        printf " │ "
+        print_table_cell "$(get_label "serial_number")" $w5
+        printf " │ "
+        print_table_cell "$(get_label "model")" $w6
+        printf " │\n"
+        echo "├$(repeat_char '─' 100)┤"
+        
+        # Parse memory modules using bash processing
+        local temp_file=$(mktemp)
+        TEMP_FILES+=("$temp_file")
+        dmidecode -t memory 2>/dev/null > "$temp_file"
+        
+        # Process memory modules
+        local size="" type="" speed="" manufacturer="" part_number="" serial_number=""
+        local in_memory_device=0
+        
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^Handle.*DMI\ type\ 17 ]]; then
+                # Print previous module if we have valid data
+                if [[ -n "$size" && ! "$size" =~ (No\ Module\ Installed|Unknown|Not\ Specified) ]]; then
+                    # Format serial number for display
+                    local display_sn="$serial_number"
+                    if [[ -z "$display_sn" || "$display_sn" =~ (Not\ Specified|Unknown) ]]; then
+                        display_sn="N/A"
+                    fi
+                    
+                    # Print row with proper alignment
+                    printf "│ "
+                    print_table_cell "${size:0:8}" $w1
+                    printf " │ "
+                    print_table_cell "${type:0:6}" $w2
+                    printf " │ "
+                    print_table_cell "${speed:0:12}" $w3
+                    printf " │ "
+                    print_table_cell "${manufacturer:0:12}" $w4
+                    printf " │ "
+                    print_table_cell "${display_sn:0:15}" $w5
+                    printf " │ "
+                    print_table_cell "${part_number:0:20}" $w6
+                    printf " │\n"
+
+                    local module_kv=(
+                        "$(json_kv "size" "$size")"
+                        "$(json_kv "type" "$type")"
+                        "$(json_kv "frequency" "$speed")"
+                        "$(json_kv "manufacturer" "$manufacturer")"
+                        "$(json_kv "serial_number" "$display_sn")"
+                        "$(json_kv "model" "$part_number")"
+                    )
+                    JSON_RAM_MODULES+=("$(json_obj "${module_kv[@]}")")
+                fi
+                # Reset for new module
+                size="" type="" speed="" manufacturer="" part_number="" serial_number=""
+                in_memory_device=1
+            elif [[ $in_memory_device -eq 1 ]]; then
+                if [[ "$line" =~ ^[[:space:]]*Size:[[:space:]]*(.*) ]]; then
+                    size="${BASH_REMATCH[1]}"
+                elif [[ "$line" =~ ^[[:space:]]*Type:[[:space:]]*(.*) ]] && [[ -z "$type" ]]; then
+                    type="${BASH_REMATCH[1]}"
+                elif [[ "$line" =~ ^[[:space:]]*Speed:[[:space:]]*(.*) ]] && [[ -z "$speed" ]]; then
+                    speed="${BASH_REMATCH[1]}"
+                elif [[ "$line" =~ ^[[:space:]]*Manufacturer:[[:space:]]*(.*) ]]; then
+                    manufacturer="${BASH_REMATCH[1]}"
+                elif [[ "$line" =~ ^[[:space:]]*Part\ Number:[[:space:]]*(.*) ]]; then
+                    part_number="${BASH_REMATCH[1]}"
+                elif [[ "$line" =~ ^[[:space:]]*Serial\ Number:[[:space:]]*(.*) ]]; then
+                    serial_number="${BASH_REMATCH[1]}"
+                fi
+            fi
+        done < "$temp_file"
+        
+        # Print last module if valid
+        if [[ -n "$size" && ! "$size" =~ (No\ Module\ Installed|Unknown|Not\ Specified) ]]; then
+            local display_sn="$serial_number"
+            if [[ -z "$display_sn" || "$display_sn" =~ (Not\ Specified|Unknown) ]]; then
+                display_sn="N/A"
+            fi
+            
+            printf "│ "
+            print_table_cell "${size:0:8}" $w1
+            printf " │ "
+            print_table_cell "${type:0:6}" $w2
+            printf " │ "
+            print_table_cell "${speed:0:12}" $w3
+            printf " │ "
+            print_table_cell "${manufacturer:0:12}" $w4
+            printf " │ "
+            print_table_cell "${display_sn:0:15}" $w5
+            printf " │ "
+            print_table_cell "${part_number:0:20}" $w6
+            printf " │\n"
+
+            local module_kv=(
+                "$(json_kv "size" "$size")"
+                "$(json_kv "type" "$type")"
+                "$(json_kv "frequency" "$speed")"
+                "$(json_kv "manufacturer" "$manufacturer")"
+                "$(json_kv "serial_number" "$display_sn")"
+                "$(json_kv "model" "$part_number")"
+            )
+            JSON_RAM_MODULES+=("$(json_obj "${module_kv[@]}")")
+        fi
+
+        # Print table footer
+        echo "└$(repeat_char '─' 100)┘"
+    else
+        # Alternative method using /proc/meminfo and lshw
+        echo "│   Root privileges required for detailed memory information"
+        if command -v lshw >/dev/null 2>&1; then
+            echo "│   Alternative detection using lshw:"
+            local lshw_output=""
+            if [[ $EUID -eq 0 ]]; then
+                lshw_output=$(lshw -c memory 2>/dev/null)
+            elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+                lshw_output=$(sudo -n lshw -c memory 2>/dev/null)
+            else
+                lshw_output=$(lshw -c memory 2>/dev/null)
+            fi
+            echo "$lshw_output" | grep -A5 -B1 "bank\|slot\|DIMM" | grep -E "description:|size:|clock:" | while IFS= read -r line; do
+                echo "│   $line"
+            done
+        fi
+        
+        # Try alternative dmidecode without root (some systems allow it)
+        if command -v dmidecode >/dev/null 2>&1; then
+            echo "│   Attempting dmidecode (may fail without root):"
+            dmidecode -t 17 2>/dev/null | grep -E "Size:|Type:|Speed:|Manufacturer:" | head -20 | while IFS= read -r line; do
+                echo "│   $line"
+            done
+        fi
+    fi
+    
+    echo "└$(repeat_char '─' 50)"
+}
+
+# Helper function: Convert bytes to human readable format
+format_bytes() {
+    local bytes="$1"
+    local suffix="$2"  # Optional suffix like "(SMART)" or "(session)"
+
+    if [[ -z "$bytes" || "$bytes" == "0" || ! "$bytes" =~ ^[0-9]+$ ]]; then
+        echo ""
+        return
+    fi
+
+    local result=""
+    if (( bytes >= 1125899906842624 )); then  # >= 1 PB
+        result=$(echo "scale=2; $bytes / 1125899906842624" | bc -l 2>/dev/null)
+        result="${result} PB"
+    elif (( bytes >= 1099511627776 )); then  # >= 1 TB
+        result=$(echo "scale=2; $bytes / 1099511627776" | bc -l 2>/dev/null)
+        result="${result} TB"
+    elif (( bytes >= 1073741824 )); then  # >= 1 GB
+        result=$(echo "scale=2; $bytes / 1073741824" | bc -l 2>/dev/null)
+        result="${result} GB"
+    elif (( bytes >= 1048576 )); then  # >= 1 MB
+        result=$(echo "scale=2; $bytes / 1048576" | bc -l 2>/dev/null)
+        result="${result} MB"
+    else
+        result=$(echo "scale=2; $bytes / 1024" | bc -l 2>/dev/null)
+        result="${result} KB"
+    fi
+
+    [[ -n "$suffix" ]] && result="$result $suffix"
+    echo "$result"
+}
+
+# Helper function: Extract value from JSON using basic pattern matching
+# Usage: json_extract "key" "$json_string"
+json_extract() {
+    local key="$1"
+    local json="$2"
+    echo "$json" | grep -oP "\"$key\"\s*:\s*\K[0-9]+" | head -1
+}
+
+# Helper function: Extract string value from JSON
+json_extract_string() {
+    local key="$1"
+    local json="$2"
+    echo "$json" | grep -oP "\"$key\"\s*:\s*\"\K[^\"]*" | head -1
+}
+
+# Helper function: Query smartctl JSON with jq when available
+json_query() {
+    local filter="$1"
+    local json="$2"
+    local result=""
+
+    command -v jq >/dev/null 2>&1 || return 1
+    result=$(jq -r "($filter) | if . == null then empty else . end" 2>/dev/null <<< "$json") || return 1
+    [[ -z "$result" || "$result" == "null" ]] && return 1
+    printf '%s\n' "$result"
+}
+
+# Function to check if a disk is a RAID controller virtual disk
+is_raid_controller_disk() {
+    local disk="$1"
+    local json="$2"
+
+    # Check if SMART is not available (common for RAID controllers)
+    local smart_available=$(json_query '.smart_support.available' "$json" || true)
+    [[ -z "$smart_available" ]] && smart_available=$(echo "$json" | grep -oP '"smart_support"\s*:\s*\{[^}]*"available"\s*:\s*\K(true|false)' | head -1)
+
+    # Check for known RAID controller vendors
+    local scsi_vendor=$(json_query '.scsi_vendor' "$json" || true)
+    local scsi_product=$(json_query '.scsi_product' "$json" || true)
+    [[ -z "$scsi_vendor" ]] && scsi_vendor=$(echo "$json" | grep -oP '"scsi_vendor"\s*:\s*"\K[^"]*' | head -1)
+    [[ -z "$scsi_product" ]] && scsi_product=$(echo "$json" | grep -oP '"scsi_product"\s*:\s*"\K[^"]*' | head -1)
+
+    # RAID controller patterns: AVAGO (MegaRAID), LSI, DELL PERC, HP Smart Array, etc.
+    if [[ "$smart_available" == "false" ]]; then
+        case "$scsi_vendor" in
+            AVAGO|LSI|"DELL"|"HP"|"Adaptec"|"3ware")
+                return 0  # Is a RAID controller
+                ;;
+        esac
+        # Also check product name for MegaRAID patterns
+        if [[ "$scsi_product" =~ MR[0-9]|PERC|SmartArray|RAID|Logical ]]; then
+            return 0  # Is a RAID controller
+        fi
+    fi
+
+    return 1  # Not a RAID controller
+}
+
+# Cached smartctl --scan output to avoid repeated scans
+get_smartctl_scan() {
+    if [[ "$SMARTCTL_SCAN_DONE" == true ]]; then
+        echo "$SMARTCTL_SCAN_CACHE"
+        return
+    fi
+
+    if command -v smartctl >/dev/null 2>&1; then
+        SMARTCTL_SCAN_CACHE=$(smartctl --scan 2>/dev/null)
+    else
+        SMARTCTL_SCAN_CACHE=""
+    fi
+
+    SMARTCTL_SCAN_DONE=true
+    echo "$SMARTCTL_SCAN_CACHE"
+}
+
+# Function to get RAID member disks from smartctl --scan
+# Supports: megaraid (LSI/AVAGO), cciss (HP Smart Array), 3ware, areca
+get_raid_member_devices() {
+    local parent_disk="$1"
+    local devices=()
+
+    if [[ "$RAID_MEMBER_CACHE_READY" == true ]]; then
+        [[ -n "$RAID_MEMBER_CACHE" ]] && printf '%s\n' "$RAID_MEMBER_CACHE"
+        return
+    fi
+
+    # Run smartctl --scan and look for RAID devices (cached)
+    local scan_output=$(get_smartctl_scan)
+
+    # Extract RAID device entries
+    # Format examples:
+    #   /dev/bus/6 -d megaraid,32 # /dev/bus/6 [megaraid_disk_32], SCSI device
+    #   /dev/sda -d cciss,0 # /dev/sda [cciss_disk_00], SCSI device
+    #   /dev/twa0 -d 3ware,0 # /dev/twa0 [3ware_disk_00], ATA device
+    while IFS= read -r line; do
+        local device=$(echo "$line" | awk '{print $1}')
+        if [[ "$line" =~ megaraid,([0-9]+) ]]; then
+            local raid_id="${BASH_REMATCH[1]}"
+            devices+=("$device:megaraid:$raid_id")
+        elif [[ "$line" =~ cciss,([0-9]+) ]]; then
+            local raid_id="${BASH_REMATCH[1]}"
+            devices+=("$device:cciss:$raid_id")
+        elif [[ "$line" =~ 3ware,([0-9]+) ]]; then
+            local raid_id="${BASH_REMATCH[1]}"
+            devices+=("$device:3ware:$raid_id")
+        elif [[ "$line" =~ areca,([0-9]+) ]]; then
+            local raid_id="${BASH_REMATCH[1]}"
+            devices+=("$device:areca:$raid_id")
+        fi
+    done <<< "$scan_output"
+
+    RAID_MEMBER_CACHE=$(printf '%s\n' "${devices[@]}")
+    RAID_MEMBER_CACHE_READY=true
+
+    # Return devices array as newline-separated string
+    [[ -n "$RAID_MEMBER_CACHE" ]] && printf '%s\n' "$RAID_MEMBER_CACHE"
+}
+
+# Function to get unique RAID controller device paths
+# Returns newline-separated list of unique controller devices (e.g., /dev/bus/6, /dev/bus/10)
+get_raid_controller_devices() {
+    local raid_devs=$(get_raid_member_devices "")
+    local controllers=()
+    local -A seen_controllers=()
+    
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+        local device=$(echo "$entry" | cut -d: -f1)
+        # Check if we've already seen this controller device
+        if [[ -z "${seen_controllers[$device]+x}" ]]; then
+            controllers+=("$device")
+            seen_controllers[$device]=1
+        fi
+    done <<< "$raid_devs"
+    
+    printf '%s\n' "${controllers[@]}"
+}
+
+# Backward compatibility alias
+get_megaraid_devices() {
+    get_raid_member_devices "$@"
+}
+
+# Function to get SMART JSON for RAID member device
+# Supports: megaraid, cciss, 3ware, areca
+get_smart_json_raid() {
+    local device="$1"
+    local raid_type="$2"
+    local raid_id="$3"
+    local json_output=""
+    local cache_key="${device}|${raid_type}|${raid_id}"
+
+    if [[ "${SMART_JSON_RAID_CACHE_READY[$cache_key]}" == "1" ]]; then
+        echo "${SMART_JSON_RAID_CACHE[$cache_key]}"
+        return
+    fi
+
+    json_output=$(smartctl -a --json=c -d "$raid_type","$raid_id" "$device" 2>/dev/null)
+
+    if [[ -n "$json_output" ]] && echo "$json_output" | grep -q '"json_format_version"'; then
+        SMART_JSON_RAID_CACHE[$cache_key]="$json_output"
+        SMART_JSON_RAID_CACHE_READY[$cache_key]=1
+        echo "$json_output"
+    else
+        SMART_JSON_RAID_CACHE[$cache_key]=""
+        SMART_JSON_RAID_CACHE_READY[$cache_key]=1
+        echo ""
+    fi
+}
+
+# Backward compatibility alias
+get_smart_json_megaraid() {
+    local device="$1"
+    local megaraid_id="$2"
+    get_smart_json_raid "$device" "megaraid" "$megaraid_id"
+}
+
+# ==========================================================================
+# Universal Bad Blocks Detection Function
+# ==========================================================================
+# This function detects and displays disk defects from either JSON or text input.
+# It checks ALL available fields regardless of drive type (SAS or SATA).
+#
+# Usage:
+#   detect_bad_blocks "json" "$json_data"     # For JSON input
+#   detect_bad_blocks "text" "$smart_text"    # For text input
+#
+# Detected fields:
+#   SAS/SCSI: scsi_grown_defect_list, total_uncorrected_errors, non_medium_error_count
+#   SATA/ATA: Reallocated_Sector_Ct, Current_Pending_Sector, Offline_Uncorrectable, Reported_Uncorrect
+# ==========================================================================
+detect_bad_blocks() {
+    local input_type="$1"  # "json" or "text"
+    local data="$2"
+
+    if [[ -z "$data" ]]; then
+        return 1
+    fi
+
+    # Initialize all variables
+    local grown_defects=""
+    local read_uncorrected=""
+    local write_uncorrected=""
+    local verify_uncorrected=""
+    local non_medium_errors=""
+    local reallocated_sectors=""
+    local pending_sectors=""
+    local offline_uncorrectable=""
+    local reported_uncorrect=""
+
+    if [[ "$input_type" == "json" ]]; then
+        # ==========================================================================
+        # JSON Parsing
+        # ==========================================================================
+        
+        # Try to extract ALL fields using jq if available
+        if command -v jq >/dev/null 2>&1; then
+            # SAS/SCSI style fields
+            grown_defects=$(echo "$data" | jq -r '.scsi_grown_defect_list // empty' 2>/dev/null)
+            read_uncorrected=$(echo "$data" | jq -r '.scsi_error_counter_log.read.total_uncorrected_errors // empty' 2>/dev/null)
+            write_uncorrected=$(echo "$data" | jq -r '.scsi_error_counter_log.write.total_uncorrected_errors // empty' 2>/dev/null)
+            verify_uncorrected=$(echo "$data" | jq -r '.scsi_error_counter_log.verify.total_uncorrected_errors // empty' 2>/dev/null)
+            non_medium_errors=$(echo "$data" | jq -r '.scsi_error_counter_log.non_medium_error_count // empty' 2>/dev/null)
+            
+            # SATA/ATA style fields (SMART attributes)
+            reallocated_sectors=$(echo "$data" | jq -r '.ata_smart_attributes.table[] | select(.id == 5) | .raw.value' 2>/dev/null)
+            pending_sectors=$(echo "$data" | jq -r '.ata_smart_attributes.table[] | select(.id == 197) | .raw.value' 2>/dev/null)
+            offline_uncorrectable=$(echo "$data" | jq -r '.ata_smart_attributes.table[] | select(.id == 198) | .raw.value' 2>/dev/null)
+            reported_uncorrect=$(echo "$data" | jq -r '.ata_smart_attributes.table[] | select(.id == 187) | .raw.value' 2>/dev/null)
+        fi
+
+        # Fallback to grep for SAS/SCSI fields
+        if [[ -z "$grown_defects" || "$grown_defects" == "null" ]]; then
+            grown_defects=$(echo "$data" | grep -oP '"scsi_grown_defect_list"\s*:\s*\K[0-9]+' | head -1)
+        fi
+        if [[ -z "$read_uncorrected" || "$read_uncorrected" == "null" ]]; then
+            read_uncorrected=$(echo "$data" | grep -A5 '"read"' | grep -oP '"total_uncorrected_errors"\s*:\s*\K[0-9]+' | head -1)
+        fi
+        if [[ -z "$write_uncorrected" || "$write_uncorrected" == "null" ]]; then
+            write_uncorrected=$(echo "$data" | grep -A5 '"write"' | grep -oP '"total_uncorrected_errors"\s*:\s*\K[0-9]+' | head -1)
+        fi
+        if [[ -z "$verify_uncorrected" || "$verify_uncorrected" == "null" ]]; then
+            verify_uncorrected=$(echo "$data" | grep -A5 '"verify"' | grep -oP '"total_uncorrected_errors"\s*:\s*\K[0-9]+' | head -1)
+        fi
+        if [[ -z "$non_medium_errors" || "$non_medium_errors" == "null" ]]; then
+            non_medium_errors=$(echo "$data" | grep -oP '"non_medium_error_count"\s*:\s*\K[0-9]+' | head -1)
+        fi
+
+        # Fallback to grep for SATA/ATA fields
+        if [[ -z "$reallocated_sectors" || "$reallocated_sectors" == "null" ]]; then
+            reallocated_sectors=$(echo "$data" | grep -A20 '"Reallocated_Sector_Ct"' | grep -oP '"raw"\s*:\s*\{\s*"value"\s*:\s*\K[0-9]+' | head -1)
+        fi
+        if [[ -z "$pending_sectors" || "$pending_sectors" == "null" ]]; then
+            pending_sectors=$(echo "$data" | grep -A20 '"Current_Pending_Sector"' | grep -oP '"raw"\s*:\s*\{\s*"value"\s*:\s*\K[0-9]+' | head -1)
+        fi
+        if [[ -z "$offline_uncorrectable" || "$offline_uncorrectable" == "null" ]]; then
+            offline_uncorrectable=$(echo "$data" | grep -A20 '"Offline_Uncorrectable"' | grep -oP '"raw"\s*:\s*\{\s*"value"\s*:\s*\K[0-9]+' | head -1)
+        fi
+        if [[ -z "$reported_uncorrect" || "$reported_uncorrect" == "null" ]]; then
+            reported_uncorrect=$(echo "$data" | grep -A20 '"Reported_Uncorrect"' | grep -oP '"raw"\s*:\s*\{\s*"value"\s*:\s*\K[0-9]+' | head -1)
+        fi
+
+    else
+        # ==========================================================================
+        # Text Parsing
+        # ==========================================================================
+        
+        # SAS/SCSI style fields
+        grown_defects=$(echo "$data" | grep -i "Elements in grown defect list" | grep -oE '[0-9]+' | head -1)
+        read_uncorrected=$(echo "$data" | grep -A2 "^read:" | grep -oE '[0-9]+$' | tail -1)
+        write_uncorrected=$(echo "$data" | grep -A2 "^write:" | grep -oE '[0-9]+$' | tail -1)
+        verify_uncorrected=$(echo "$data" | grep -A2 "^verify:" | grep -oE '[0-9]+$' | tail -1)
+        non_medium_errors=$(echo "$data" | grep -i "Non-medium error count" | grep -oE '[0-9]+' | head -1)
+
+        # SATA/ATA style fields (SMART attributes)
+        reallocated_sectors=$(echo "$data" | grep -i "Reallocated_Sector_Ct" | awk '{print $NF}')
+        pending_sectors=$(echo "$data" | grep -i "Current_Pending_Sector" | awk '{print $NF}')
+        offline_uncorrectable=$(echo "$data" | grep -i "Offline_Uncorrectable" | awk '{print $NF}')
+        reported_uncorrect=$(echo "$data" | grep -i "Reported_Uncorrect" | awk '{print $NF}')
+    fi
+
+    # ==========================================================================
+    # Display all available bad block fields
+    # ==========================================================================
+
+    # SAS/SCSI: Grown Defect List
+    if [[ -n "$grown_defects" && "$grown_defects" != "null" && "$grown_defects" =~ ^[0-9]+$ ]]; then
+        disk_smart_add "grown_defects" "$grown_defects"
+        if [[ "$grown_defects" -gt 0 ]]; then
+            printf '%b\n' "│   $(get_label "grown_defects"): ${YELLOW}${grown_defects}${NC}"
+        else
+            echo "│   $(get_label "grown_defects"): ${grown_defects}"
+        fi
+    fi
+
+    # SAS/SCSI: Uncorrected Errors (with breakdown)
+    local has_uncorrected=false
+    [[ -n "$read_uncorrected" && "$read_uncorrected" != "null" && "$read_uncorrected" =~ ^[0-9]+$ ]] && has_uncorrected=true
+    [[ -n "$write_uncorrected" && "$write_uncorrected" != "null" && "$write_uncorrected" =~ ^[0-9]+$ ]] && has_uncorrected=true
+    [[ -n "$verify_uncorrected" && "$verify_uncorrected" != "null" && "$verify_uncorrected" =~ ^[0-9]+$ ]] && has_uncorrected=true
+
+    if [[ "$has_uncorrected" == true ]]; then
+        local total_uncorrected=0
+        [[ -n "$read_uncorrected" && "$read_uncorrected" != "null" && "$read_uncorrected" =~ ^[0-9]+$ ]] && total_uncorrected=$((total_uncorrected + read_uncorrected))
+        [[ -n "$write_uncorrected" && "$write_uncorrected" != "null" && "$write_uncorrected" =~ ^[0-9]+$ ]] && total_uncorrected=$((total_uncorrected + write_uncorrected))
+        [[ -n "$verify_uncorrected" && "$verify_uncorrected" != "null" && "$verify_uncorrected" =~ ^[0-9]+$ ]] && total_uncorrected=$((total_uncorrected + verify_uncorrected))
+
+        [[ -n "$read_uncorrected" && "$read_uncorrected" != "null" && "$read_uncorrected" =~ ^[0-9]+$ ]] && disk_smart_add "read_uncorrected_errors" "$read_uncorrected"
+        [[ -n "$write_uncorrected" && "$write_uncorrected" != "null" && "$write_uncorrected" =~ ^[0-9]+$ ]] && disk_smart_add "write_uncorrected_errors" "$write_uncorrected"
+        [[ -n "$verify_uncorrected" && "$verify_uncorrected" != "null" && "$verify_uncorrected" =~ ^[0-9]+$ ]] && disk_smart_add "verify_uncorrected_errors" "$verify_uncorrected"
+        disk_smart_add "uncorrected_errors" "$total_uncorrected"
+
+        if [[ "$total_uncorrected" -gt 0 ]]; then
+            printf '%b\n' "│   $(get_label "uncorrected_errors"): ${RED}${total_uncorrected}${NC} (R:${read_uncorrected:-0}/W:${write_uncorrected:-0}/V:${verify_uncorrected:-0})"
+        else
+            echo "│   $(get_label "uncorrected_errors"): 0 (R:${read_uncorrected:-0}/W:${write_uncorrected:-0}/V:${verify_uncorrected:-0})"
+        fi
+    fi
+
+    # SAS/SCSI: Non-medium Errors
+    if [[ -n "$non_medium_errors" && "$non_medium_errors" != "null" && "$non_medium_errors" =~ ^[0-9]+$ ]]; then
+        disk_smart_add "non_medium_errors" "$non_medium_errors"
+        if [[ "$non_medium_errors" != "0" ]]; then
+            printf '%b\n' "│   $(get_label "non_medium_errors"): ${YELLOW}${non_medium_errors}${NC}"
+        fi
+    fi
+
+    local has_bad_blocks_metric=false
+
+    # SATA/ATA: Reallocated Sectors (ID 5)
+    if [[ -n "$reallocated_sectors" && "$reallocated_sectors" != "null" && "$reallocated_sectors" =~ ^[0-9]+$ ]]; then
+        has_bad_blocks_metric=true
+        disk_smart_add "reallocated_sectors" "$reallocated_sectors"
+        if [[ "$reallocated_sectors" -gt 0 ]]; then
+            printf '%b\n' "│   $(get_label "reallocated_sectors"): ${YELLOW}${reallocated_sectors}${NC}"
+        else
+            echo "│   $(get_label "reallocated_sectors"): ${reallocated_sectors}"
+        fi
+    fi
+
+    # SATA/ATA: Pending Sectors (ID 197)
+    if [[ -n "$pending_sectors" && "$pending_sectors" != "null" && "$pending_sectors" =~ ^[0-9]+$ ]]; then
+        has_bad_blocks_metric=true
+        disk_smart_add "pending_sectors" "$pending_sectors"
+        if [[ "$pending_sectors" -gt 0 ]]; then
+            printf '%b\n' "│   $(get_label "pending_sectors"): ${YELLOW}${pending_sectors}${NC}"
+        else
+            echo "│   $(get_label "pending_sectors"): ${pending_sectors}"
+        fi
+    fi
+
+    # SATA/ATA: Offline Uncorrectable (ID 198)
+    if [[ -n "$offline_uncorrectable" && "$offline_uncorrectable" != "null" && "$offline_uncorrectable" =~ ^[0-9]+$ ]]; then
+        has_bad_blocks_metric=true
+        disk_smart_add "offline_uncorrectable" "$offline_uncorrectable"
+        if [[ "$offline_uncorrectable" -gt 0 ]]; then
+            printf '%b\n' "│   $(get_label "offline_uncorrectable"): ${YELLOW}${offline_uncorrectable}${NC}"
+        else
+            echo "│   $(get_label "offline_uncorrectable"): ${offline_uncorrectable}"
+        fi
+    fi
+
+    # SATA/ATA: Reported Uncorrectable (ID 187)
+    if [[ -n "$reported_uncorrect" && "$reported_uncorrect" != "null" && "$reported_uncorrect" =~ ^[0-9]+$ ]]; then
+        disk_smart_add "reported_uncorrect" "$reported_uncorrect"
+        if [[ "$reported_uncorrect" -gt 0 ]]; then
+            printf '%b\n' "│   $(get_label "reported_uncorrect"): ${RED}${reported_uncorrect}${NC}"
+        else
+            echo "│   $(get_label "reported_uncorrect"): ${reported_uncorrect}"
+        fi
+    fi
+
+    # Calculate and display total bad blocks summary (SATA style)
+    local total_bad=0
+    [[ -n "$reallocated_sectors" && "$reallocated_sectors" != "null" && "$reallocated_sectors" =~ ^[0-9]+$ ]] && total_bad=$((total_bad + reallocated_sectors))
+    [[ -n "$pending_sectors" && "$pending_sectors" != "null" && "$pending_sectors" =~ ^[0-9]+$ ]] && total_bad=$((total_bad + pending_sectors))
+    [[ -n "$offline_uncorrectable" && "$offline_uncorrectable" != "null" && "$offline_uncorrectable" =~ ^[0-9]+$ ]] && total_bad=$((total_bad + offline_uncorrectable))
+
+    if [[ "$has_bad_blocks_metric" == true ]]; then
+        disk_smart_add "bad_blocks" "$total_bad"
+    fi
+
+    if [[ "$total_bad" -gt 0 ]]; then
+        printf '%b\n' "│   $(get_label "bad_blocks"): ${RED}${total_bad}${NC}"
+    fi
+
+    return 0
+}
+
+# Function to parse SAS/SCSI/SATA SMART data from JSON (for RAID member disks)
+parse_smart_json_sas() {
+    local json="$1"
+    local disk_label="$2"
+
+    if [[ -z "$json" ]]; then
+        return 1
+    fi
+
+    # Detect if this is a SAS/SCSI or SATA disk
+    local device_type=$(json_query '.device.type' "$json" || true)
+    local protocol=$(json_query '.device.protocol' "$json" || true)
+    [[ -z "$device_type" ]] && device_type=$(echo "$json" | grep -oP '"device"\s*:\s*\{[^}]*"type"\s*:\s*"\K[^"]*' | head -1)
+    [[ -z "$protocol" ]] && protocol=$(echo "$json" | grep -oP '"device"\s*:\s*\{[^}]*"protocol"\s*:\s*"\K[^"]*' | head -1)
+
+    # Extract basic info - try both SAS and SATA formats
+    local vendor=$(json_query '.scsi_vendor' "$json" || true)
+    local product=$(json_query '.scsi_product' "$json" || true)
+    local model_name=$(json_query '.model_name' "$json" || true)
+    local model_family=$(json_query '.model_family' "$json" || true)
+    local serial=$(json_query '.serial_number' "$json" || true)
+    local capacity_bytes=$(json_query '.user_capacity.bytes' "$json" || true)
+    [[ -z "$vendor" ]] && vendor=$(echo "$json" | grep -oP '"scsi_vendor"\s*:\s*"\K[^"]*' | head -1)
+    [[ -z "$product" ]] && product=$(echo "$json" | grep -oP '"scsi_product"\s*:\s*"\K[^"]*' | head -1)
+    [[ -z "$model_name" ]] && model_name=$(echo "$json" | grep -oP '"model_name"\s*:\s*"\K[^"]*' | head -1)
+    [[ -z "$model_family" ]] && model_family=$(echo "$json" | grep -oP '"model_family"\s*:\s*"\K[^"]*' | head -1)
+    [[ -z "$serial" ]] && serial=$(echo "$json" | grep -oP '"serial_number"\s*:\s*"\K[^"]*' | head -1)
+    [[ -z "$capacity_bytes" ]] && capacity_bytes=$(echo "$json" | grep -oP '"user_capacity"\s*:\s*\{[^}]*"bytes"\s*:\s*\K[0-9]+' | head -1)
+
+    # Format capacity
+    local capacity_formatted=""
+    if [[ -n "$capacity_bytes" && "$capacity_bytes" != "0" ]]; then
+        capacity_formatted=$(format_bytes "$capacity_bytes")
+    fi
+
+    # Display disk info
+    if [[ -n "$vendor" && -n "$product" ]]; then
+        echo "│   Model: $vendor $product"
+        disk_extra_add "model" "$vendor $product"
+    elif [[ -n "$model_name" ]]; then
+        echo "│   Model: $model_name"
+        disk_extra_add "model" "$model_name"
+    fi
+    if [[ -n "$model_family" ]]; then
+        echo "│   Family: $model_family"
+        disk_extra_add "family" "$model_family"
+    fi
+    if [[ -n "$serial" ]]; then
+        echo "│   Serial: $serial"
+        disk_extra_add "serial" "$serial"
+    fi
+    if [[ -n "$capacity_formatted" ]]; then
+        echo "│   Capacity: $capacity_formatted"
+        disk_extra_add "capacity" "$capacity_formatted"
+    fi
+
+    # SMART status - check for smart_status.passed
+    local smart_passed=$(json_query '.smart_status.passed' "$json" || true)
+    [[ -z "$smart_passed" ]] && smart_passed=$(echo "$json" | grep -oP '"smart_status"\s*:\s*\{[^}]*"passed"\s*:\s*\K(true|false)' | head -1)
+    if [[ -z "$smart_passed" ]]; then
+        # Try alternative method: check scsi_grown_defect_list element count
+        local defect_count=$(json_query '.scsi_grown_defect_list' "$json" || true)
+        [[ -z "$defect_count" ]] && defect_count=$(echo "$json" | grep -oP '"scsi_grown_defect_list"\s*:\s*\K[0-9]+' | head -1)
+        if [[ -n "$defect_count" && "$defect_count" == "0" ]]; then
+            smart_passed="true"
+        fi
+    fi
+
+    if [[ "$smart_passed" == "true" ]]; then
+        echo "│   $(get_label "smart_status"): PASSED"
+        disk_smart_add "smart_status" "PASSED"
+    elif [[ "$smart_passed" == "false" ]]; then
+        echo "│   $(get_label "smart_status"): ${RED}FAILED${NC}"
+        disk_smart_add "smart_status" "FAILED"
+    else
+        echo "│   $(get_label "smart_status"): $(get_label "no_info")"
+    fi
+
+    # Temperature
+    local temperature=$(json_query '.temperature.current' "$json" || true)
+    [[ -z "$temperature" ]] && temperature=$(echo "$json" | grep -oP '"temperature"\s*:\s*\{[^}]*"current"\s*:\s*\K[0-9]+' | head -1)
+    if [[ -n "$temperature" && "$temperature" != "0" ]]; then
+        echo "│   $(get_label "temperature"): ${temperature}°C"
+        disk_smart_add "temperature" "${temperature}°C"
+    fi
+
+    # Power on hours - try multiple formats
+    local power_on_hours=$(json_query '.power_on_time.hours' "$json" || true)
+    [[ -z "$power_on_hours" ]] && power_on_hours=$(echo "$json" | grep -oP '"power_on_time"\s*:\s*\{[^}]*"hours"\s*:\s*\K[0-9]+' | head -1)
+    if [[ -n "$power_on_hours" ]]; then
+        echo "│   $(get_label "power_on_hours"): ${power_on_hours} hours"
+        disk_smart_add "power_on_hours" "$power_on_hours"
+    fi
+
+    # ==========================================================================
+    # Bad Blocks / Defect Detection for RAID member disks
+    # ==========================================================================
+    # Call the universal bad blocks detection function with JSON input
+    # ==========================================================================
+    detect_bad_blocks "json" "$json"
+
+    return 0
+}
+
+# Function to display RAID member disks (supports megaraid, cciss, 3ware, areca)
+# Parameters:
+#   $1 - parent_disk (unused, kept for compatibility)
+#   $2 - controller_device (optional): Only show disks from this controller (e.g., /dev/bus/6)
+#                                      If empty, show all RAID member disks
+display_megaraid_disks() {
+    local parent_disk="$1"
+    local controller_filter="$2"
+
+    # Get RAID member devices
+    local raid_devs=$(get_raid_member_devices "$parent_disk")
+
+    if [[ -z "$raid_devs" ]]; then
+        if [[ "$LANG_MODE" == "cn" ]]; then
+            echo "│   阵列成员: 无法检测到阵列成员磁盘"
+            echo "│   → 请尝试: smartctl --scan"
+        else
+            echo "│   RAID Members: Unable to detect member disks"
+            echo "│   → Try: smartctl --scan"
+        fi
+        return 1
+    fi
+
+    echo "│"
+    if [[ "$LANG_MODE" == "cn" ]]; then
+        print_color "$YELLOW" "│   ══ 阵列成员磁盘 ══"
+    else
+        print_color "$YELLOW" "│   ══ RAID Member Disks ══"
+    fi
+
+    local disk_count=0
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+
+        # Parse format: device:raid_type:raid_id
+        local device=$(echo "$entry" | cut -d: -f1)
+        local raid_type=$(echo "$entry" | cut -d: -f2)
+        local raid_id=$(echo "$entry" | cut -d: -f3)
+
+        # If controller filter is specified, skip devices from other controllers
+        if [[ -n "$controller_filter" && "$device" != "$controller_filter" ]]; then
+            continue
+        fi
+
+        ((disk_count++))
+        echo "│"
+        print_color "$CYAN" "│   ─── Disk $disk_count ($raid_type,$raid_id) ───"
+
+        disk_smart_reset
+        DISK_JSON_EXTRA=()
+        disk_extra_add "raid_type" "$raid_type"
+        disk_extra_add "raid_id" "$raid_id"
+        disk_extra_add "controller_device" "$device"
+
+        # Get SMART data for this RAID member disk
+        local json_data=$(get_smart_json_raid "$device" "$raid_type" "$raid_id")
+
+        if [[ -n "$json_data" ]]; then
+            parse_smart_json_sas "$json_data" "$raid_type,$raid_id"
+        else
+            # Try text-based parsing as fallback
+            local smart_text=$(smartctl -a -d "$raid_type","$raid_id" "$device" 2>/dev/null)
+            if [[ -n "$smart_text" ]]; then
+                # Extract basic info from text output (works for both SAS and SATA)
+                local vendor=$(echo "$smart_text" | grep "^Vendor:" | awk '{print $2}')
+                local product=$(echo "$smart_text" | grep "^Product:" | awk '{print $2}')
+                local model=$(echo "$smart_text" | grep "^Device Model:" | sed 's/^Device Model:\s*//')
+                local serial=$(echo "$smart_text" | grep -E "^Serial [Nn]umber:" | awk '{print $3}')
+                local health=$(echo "$smart_text" | grep -E "SMART (overall-health|Health Status):" | awk -F': ' '{print $2}')
+                local temp=$(echo "$smart_text" | grep -E "Current Drive Temperature:|^Temperature:" | grep -oE '[0-9]+' | head -1)
+                local power_hours=$(echo "$smart_text" | grep -E "Accumulated power on time|Power_On_Hours" | grep -oE '[0-9]+' | head -1)
+
+                # Display model (SAS format: Vendor Product, SATA format: Device Model)
+                if [[ -n "$vendor" && -n "$product" ]]; then
+                    echo "│   Model: $vendor $product"
+                    disk_extra_add "model" "$vendor $product"
+                elif [[ -n "$model" ]]; then
+                    echo "│   Model: $model"
+                    disk_extra_add "model" "$model"
+                fi
+                if [[ -n "$serial" ]]; then
+                    echo "│   Serial: $serial"
+                    disk_extra_add "serial" "$serial"
+                fi
+
+                if [[ -n "$health" ]]; then
+                    if [[ "$health" == "OK" || "$health" == "PASSED" ]]; then
+                        echo "│   $(get_label "smart_status"): PASSED"
+                        disk_smart_add "smart_status" "PASSED"
+                    else
+                        echo "│   $(get_label "smart_status"): ${RED}${health}${NC}"
+                        disk_smart_add "smart_status" "$health"
+                    fi
+                fi
+
+                if [[ -n "$power_hours" ]]; then
+                    echo "│   $(get_label "power_on_hours"): ${power_hours} hours"
+                    disk_smart_add "power_on_hours" "$power_hours"
+                fi
+                if [[ -n "$temp" && "$temp" != "0" ]]; then
+                    echo "│   $(get_label "temperature"): ${temp}°C"
+                    disk_smart_add "temperature" "${temp}°C"
+                fi
+
+                # ==========================================================================
+                # Bad Blocks Detection for RAID member disks (text fallback)
+                # ==========================================================================
+                # Call the universal bad blocks detection function with text input
+                # ==========================================================================
+                detect_bad_blocks "text" "$smart_text"
+            else
+                if [[ "$LANG_MODE" == "cn" ]]; then
+                    echo "│   SMART状态: 无法读取"
+                else
+                    echo "│   SMART Status: Unable to read"
+                fi
+            fi
+        fi
+
+        disk_json_add "raid_member" "$device" ""
+    done <<< "$raid_devs"
+
+    if [[ "$LANG_MODE" == "cn" ]]; then
+        echo "│   ─── 共检测到 $disk_count 块成员磁盘 ───"
+    else
+        echo "│   ─── Total: $disk_count member disk(s) ───"
+    fi
+
+    return 0
+}
+
+# Function to get SMART data using JSON output (smartctl 7.0+)
+get_smart_json() {
+    local disk="$1"
+    local json_output=""
+
+    if [[ "${SMART_JSON_CACHE_READY[$disk]}" == "1" ]]; then
+        echo "${SMART_JSON_CACHE[$disk]}"
+        return
+    fi
+
+    # Try to get JSON output from smartctl
+    json_output=$(smartctl -a --json=c "/dev/$disk" 2>/dev/null)
+
+    # Check if JSON output is valid
+    if [[ -n "$json_output" ]] && echo "$json_output" | grep -q '"json_format_version"'; then
+        SMART_JSON_CACHE[$disk]="$json_output"
+        SMART_JSON_CACHE_READY[$disk]=1
+        echo "$json_output"
+    else
+        SMART_JSON_CACHE[$disk]=""
+        SMART_JSON_CACHE_READY[$disk]=1
+        echo ""
+    fi
+}
+
+# Function to parse SMART data from JSON
+parse_smart_json() {
+    local disk="$1"
+    local json="$2"
+
+    if [[ -z "$json" ]]; then
+        return 1
+    fi
+
+    # Extract common fields
+    local smart_status=$(json_query '.smart_status.passed' "$json" || true)
+    local temperature=$(json_query '.temperature.current' "$json" || true)
+    local power_on_hours=$(json_query '.power_on_time.hours' "$json" || true)
+    local model_family=$(json_query '.model_family' "$json" || true)
+    [[ -z "$smart_status" ]] && smart_status=$(echo "$json" | grep -oP '"passed"\s*:\s*\K(true|false)' | head -1)
+    [[ -z "$temperature" ]] && temperature=$(echo "$json" | grep -oP '"temperature"\s*:\s*\{\s*"current"\s*:\s*\K[0-9]+' | head -1)
+    [[ -z "$power_on_hours" ]] && power_on_hours=$(echo "$json" | grep -oP '"power_on_time"\s*:\s*\{\s*"hours"\s*:\s*\K[0-9]+' | head -1)
+    [[ -z "$model_family" ]] && model_family=$(echo "$json" | grep -oP '"model_family"\s*:\s*"\K[^"]*' | head -1)
+
+    # SMART Status
+    if [[ "$smart_status" == "true" ]]; then
+        echo "│   $(get_label "smart_status"): PASSED"
+        disk_smart_add "smart_status" "PASSED"
+    elif [[ "$smart_status" == "false" ]]; then
+        echo "│   $(get_label "smart_status"): ${RED}FAILED${NC}"
+        disk_smart_add "smart_status" "FAILED"
+    else
+        echo "│   $(get_label "smart_status"): $(get_label "no_info")"
+    fi
+
+    # Power on hours
+    if [[ -n "$power_on_hours" ]]; then
+        echo "│   $(get_label "power_on_hours"): ${power_on_hours} hours"
+        disk_smart_add "power_on_hours" "$power_on_hours"
+    fi
+
+    # Data transfer - check if NVMe
+    if [[ "$disk" =~ nvme ]]; then
+        # NVMe: data_units_read/written (each unit = 512 * 1000 bytes)
+        local data_units_read=$(json_query '.nvme_smart_health_information_log.data_units_read // .data_units_read' "$json" || true)
+        local data_units_written=$(json_query '.nvme_smart_health_information_log.data_units_written // .data_units_written' "$json" || true)
+        [[ -z "$data_units_read" ]] && data_units_read=$(echo "$json" | grep -oP '"data_units_read"\s*:\s*\K[0-9]+' | head -1)
+        [[ -z "$data_units_written" ]] && data_units_written=$(echo "$json" | grep -oP '"data_units_written"\s*:\s*\K[0-9]+' | head -1)
+
+        if [[ -n "$data_units_read" && "$data_units_read" != "0" ]]; then
+            local bytes_read=$((data_units_read * 512000))
+            local formatted=$(format_bytes "$bytes_read")
+            if [[ -n "$formatted" ]]; then
+                echo "│   $(get_label "total_reads"): $formatted"
+                disk_smart_add "total_reads" "$formatted"
+            fi
+        fi
+
+        if [[ -n "$data_units_written" && "$data_units_written" != "0" ]]; then
+            local bytes_written=$((data_units_written * 512000))
+            local formatted=$(format_bytes "$bytes_written")
+            if [[ -n "$formatted" ]]; then
+                echo "│   $(get_label "total_writes"): $formatted"
+                disk_smart_add "total_writes" "$formatted"
+            fi
+        fi
+
+        # NVMe health info
+        local percentage_used=$(json_query '.nvme_smart_health_information_log.percentage_used // .percentage_used' "$json" || true)
+        local available_spare=$(json_query '.nvme_smart_health_information_log.available_spare // .available_spare' "$json" || true)
+        local critical_warning=$(json_query '.nvme_smart_health_information_log.critical_warning // .critical_warning' "$json" || true)
+        [[ -z "$percentage_used" ]] && percentage_used=$(echo "$json" | grep -oP '"percentage_used"\s*:\s*\K[0-9]+' | head -1)
+        [[ -z "$available_spare" ]] && available_spare=$(echo "$json" | grep -oP '"available_spare"\s*:\s*\K[0-9]+' | head -1)
+        [[ -z "$critical_warning" ]] && critical_warning=$(echo "$json" | grep -oP '"critical_warning"\s*:\s*\K[0-9]+' | head -1)
+
+        if [[ -n "$percentage_used" ]]; then
+            echo "│   $(get_label "percentage_used"): ${percentage_used}%"
+            local health=$((100 - percentage_used))
+            [[ $health -lt 0 ]] && health=0
+            echo "│   $(get_label "health_status"): ${health}%"
+            disk_smart_add "percentage_used" "$percentage_used"
+            disk_smart_add "health_status" "$health"
+        fi
+
+        if [[ -n "$available_spare" ]]; then
+            echo "│   $(get_label "available_spare"): ${available_spare}%"
+            disk_smart_add "available_spare" "$available_spare"
+        fi
+
+        if [[ -n "$critical_warning" && "$critical_warning" != "0" ]]; then
+            echo "│   $(get_label "critical_warning"): ${critical_warning}"
+            disk_smart_add "critical_warning" "$critical_warning"
+        fi
+    else
+        # SATA/HDD/SSD: Look for LBA counts in ata_smart_attributes
+        # Different vendors use different attribute IDs:
+        #   - ID 241: Total_LBAs_Written (most common)
+        #   - ID 242: Total_LBAs_Read (most common)
+        #   - ID 246: Total_LBAs_Written (some SSDs)
+        #   - ID 247: Host_Reads_32MiB (some vendors)
+        #   - ID 248: Host_Writes_32MiB (some vendors)
+        #   - ID 233: Media_Wearout_Indicator (Intel SSDs, for wear level)
+        local lba_written=""
+        local lba_read=""
+        local write_multiplier=512  # Default: LBA size in bytes
+        local read_multiplier=512
+
+        # Method 1: Try using jq if available (most reliable)
+        if command -v jq >/dev/null 2>&1; then
+            # Try common attribute IDs for writes: 241, 246, 248
+            lba_written=$(echo "$json" | jq -r '.ata_smart_attributes.table[] | select(.id == 241) | .raw.value' 2>/dev/null)
+            if [[ -z "$lba_written" || "$lba_written" == "null" ]]; then
+                lba_written=$(echo "$json" | jq -r '.ata_smart_attributes.table[] | select(.id == 246) | .raw.value' 2>/dev/null)
+            fi
+            if [[ -z "$lba_written" || "$lba_written" == "null" ]]; then
+                # ID 248: Host_Writes_32MiB - value is in 32MiB units
+                lba_written=$(echo "$json" | jq -r '.ata_smart_attributes.table[] | select(.id == 248) | .raw.value' 2>/dev/null)
+                if [[ -n "$lba_written" && "$lba_written" != "null" ]]; then
+                    write_multiplier=$((32 * 1024 * 1024))  # 32 MiB
+                fi
+            fi
+
+            # Try common attribute IDs for reads: 242, 247
+            lba_read=$(echo "$json" | jq -r '.ata_smart_attributes.table[] | select(.id == 242) | .raw.value' 2>/dev/null)
+            if [[ -z "$lba_read" || "$lba_read" == "null" ]]; then
+                # ID 247: Host_Reads_32MiB - value is in 32MiB units
+                lba_read=$(echo "$json" | jq -r '.ata_smart_attributes.table[] | select(.id == 247) | .raw.value' 2>/dev/null)
+                if [[ -n "$lba_read" && "$lba_read" != "null" ]]; then
+                    read_multiplier=$((32 * 1024 * 1024))  # 32 MiB
+                fi
+            fi
+        fi
+
+        # Method 2: Fallback to grep if jq not available or failed
+        if [[ -z "$lba_written" || "$lba_written" == "null" ]]; then
+            # Try by attribute name patterns
+            lba_written=$(echo "$json" | grep -A15 '"Total_LBAs_Written"' | grep -oP '"value"\s*:\s*\K[0-9]+' | head -1)
+            if [[ -z "$lba_written" ]]; then
+                lba_written=$(echo "$json" | grep -A15 '"Total_Writes_32MiB"' | grep -oP '"value"\s*:\s*\K[0-9]+' | head -1)
+                [[ -n "$lba_written" ]] && write_multiplier=$((32 * 1024 * 1024))
+            fi
+            if [[ -z "$lba_written" ]]; then
+                lba_written=$(echo "$json" | grep -A15 '"Host_Writes_32MiB"' | grep -oP '"value"\s*:\s*\K[0-9]+' | head -1)
+                [[ -n "$lba_written" ]] && write_multiplier=$((32 * 1024 * 1024))
+            fi
+            if [[ -z "$lba_written" ]]; then
+                lba_written=$(echo "$json" | grep -A15 '"Host_Writes_MiB"' | grep -oP '"value"\s*:\s*\K[0-9]+' | head -1)
+                [[ -n "$lba_written" ]] && write_multiplier=$((1024 * 1024))
+            fi
+        fi
+
+        if [[ -z "$lba_read" || "$lba_read" == "null" ]]; then
+            lba_read=$(echo "$json" | grep -A15 '"Total_LBAs_Read"' | grep -oP '"value"\s*:\s*\K[0-9]+' | head -1)
+            if [[ -z "$lba_read" ]]; then
+                lba_read=$(echo "$json" | grep -A15 '"Total_Reads_32MiB"' | grep -oP '"value"\s*:\s*\K[0-9]+' | head -1)
+                [[ -n "$lba_read" ]] && read_multiplier=$((32 * 1024 * 1024))
+            fi
+            if [[ -z "$lba_read" ]]; then
+                lba_read=$(echo "$json" | grep -A15 '"Host_Reads_32MiB"' | grep -oP '"value"\s*:\s*\K[0-9]+' | head -1)
+                [[ -n "$lba_read" ]] && read_multiplier=$((32 * 1024 * 1024))
+            fi
+            if [[ -z "$lba_read" ]]; then
+                lba_read=$(echo "$json" | grep -A15 '"Host_Reads_MiB"' | grep -oP '"value"\s*:\s*\K[0-9]+' | head -1)
+                [[ -n "$lba_read" ]] && read_multiplier=$((1024 * 1024))
+            fi
+        fi
+
+        if [[ -n "$lba_read" && "$lba_read" != "0" && "$lba_read" != "null" ]]; then
+            local bytes_read=$((lba_read * read_multiplier))
+            local formatted=$(format_bytes "$bytes_read")
+            if [[ -n "$formatted" ]]; then
+                echo "│   $(get_label "total_reads"): $formatted"
+                disk_smart_add "total_reads" "$formatted"
+            fi
+        fi
+
+        if [[ -n "$lba_written" && "$lba_written" != "0" && "$lba_written" != "null" ]]; then
+            local bytes_written=$((lba_written * write_multiplier))
+            local formatted=$(format_bytes "$bytes_written")
+            if [[ -n "$formatted" ]]; then
+                echo "│   $(get_label "total_writes"): $formatted"
+                disk_smart_add "total_writes" "$formatted"
+            fi
+        fi
+
+        # Track if we found any I/O stats
+        local io_stats_found=false
+        [[ -n "$lba_read" && "$lba_read" != "0" && "$lba_read" != "null" ]] && io_stats_found=true
+        [[ -n "$lba_written" && "$lba_written" != "0" && "$lba_written" != "null" ]] && io_stats_found=true
+
+        # For SSDs without read/write stats, try to show wear level indicator
+        if [[ "$io_stats_found" == false ]]; then
+            local wear_level=""
+            if command -v jq >/dev/null 2>&1; then
+                # ID 177: Wear_Leveling_Count (Samsung, etc.)
+                # ID 231: SSD_Life_Left (various)
+                # ID 233: Media_Wearout_Indicator (Intel)
+                wear_level=$(echo "$json" | jq -r '.ata_smart_attributes.table[] | select(.id == 177 or .id == 231 or .id == 233) | .value' 2>/dev/null | head -1)
+            fi
+            if [[ -z "$wear_level" || "$wear_level" == "null" ]]; then
+                wear_level=$(echo "$json" | grep -A10 '"Wear_Leveling_Count"\|"SSD_Life_Left"\|"Media_Wearout_Indicator"' | grep -oP '"value"\s*:\s*\K[0-9]+' | head -1)
+            fi
+            if [[ -n "$wear_level" && "$wear_level" != "null" && "$wear_level" != "0" ]]; then
+                echo "│   $(get_label "wear_level"): ${wear_level}%"
+                disk_smart_add "wear_level" "$wear_level"
+                io_stats_found=true
+            fi
+        fi
+
+        # If no I/O stats found at all, show a note with help info
+        if [[ "$io_stats_found" == false ]]; then
+            # Check for known drive families that don't report I/O statistics
+            # Toshiba MG series enterprise HDDs don't have ID 241/242 attributes
+            local known_no_io_stats=false
+            if [[ "$model_family" =~ Toshiba\ MG[0-9]+ACA ]]; then
+                known_no_io_stats=true
+            fi
+
+            if [[ "$known_no_io_stats" == true ]]; then
+                if [[ "$LANG_MODE" == "cn" ]]; then
+                    echo "│   读写统计: 此型号硬盘不提供读写统计数据"
+                else
+                    echo "│   I/O Stats: This drive model does not report I/O statistics"
+                fi
+            else
+                if [[ "$LANG_MODE" == "cn" ]]; then
+                    echo "│   读写统计: 此硬盘型号暂不支持"
+                    echo "│   → 如需支持请提交: smartctl -a -j /dev/$disk"
+                    echo "│   → 反馈地址: https://github.com/Yuri-NagaSaki/SICK/issues"
+                else
+                    echo "│   I/O Stats: Not supported for this drive model"
+                    echo "│   → To request support: smartctl -a -j /dev/$disk"
+                    echo "│   → Report to: https://github.com/Yuri-NagaSaki/SICK/issues"
+                fi
+            fi
+        fi
+    fi
+
+    # Temperature
+    if [[ -n "$temperature" ]]; then
+        echo "│   $(get_label "temperature"): ${temperature}°C"
+        disk_smart_add "temperature" "${temperature}°C"
+    fi
+
+    # ==========================================================================
+    # Bad Blocks / Defect Detection
+    # ==========================================================================
+    # Call the universal bad blocks detection function with JSON input
+    # ==========================================================================
+    detect_bad_blocks "json" "$json"
+
+    return 0
+}
+
+# Fallback: Parse SMART data from text output (for older smartctl)
+parse_smart_text() {
+    local disk="$1"
+
+    local smart_all=$(smartctl -a "/dev/$disk" 2>/dev/null)
+    if [[ -z "$smart_all" ]]; then
+        return 1
+    fi
+
+    # SMART Status
+    local smart_health=$(echo "$smart_all" | grep -E "SMART overall-health|SMART Health Status" | awk -F': ' '{print $2}')
+    echo "│   $(get_label "smart_status"): ${smart_health:-$(get_label "no_info")}"
+    [[ -n "$smart_health" ]] && disk_smart_add "smart_status" "$smart_health"
+
+    # Power on hours
+    local power_hours=""
+    power_hours=$(echo "$smart_all" | grep -i "power.on" | grep -i hour | head -1 | grep -oE '[0-9,]+' | tr -d ',' | head -1)
+    if [[ -n "$power_hours" ]]; then
+        echo "│   $(get_label "power_on_hours"): ${power_hours} hours"
+        disk_smart_add "power_on_hours" "$power_hours"
+    fi
+
+    # Temperature
+    local temp=""
+    temp=$(echo "$smart_all" | grep -iE "^Temperature:|Temperature_Celsius" | grep -oE '[0-9]+' | head -1)
+    if [[ -n "$temp" ]]; then
+        echo "│   $(get_label "temperature"): ${temp}°C"
+        disk_smart_add "temperature" "${temp}°C"
+    fi
+
+    # NVMe specific
+    if [[ "$disk" =~ nvme ]]; then
+        # Data units (with human readable in parentheses)
+        local reads=$(echo "$smart_all" | grep -i "Data Units Read" | grep -oE '\([^)]+\)' | tr -d '()' | head -1)
+        local writes=$(echo "$smart_all" | grep -i "Data Units Written" | grep -oE '\([^)]+\)' | tr -d '()' | head -1)
+        if [[ -n "$reads" ]]; then
+            echo "│   $(get_label "total_reads"): $reads"
+            disk_smart_add "total_reads" "$reads"
+        fi
+        if [[ -n "$writes" ]]; then
+            echo "│   $(get_label "total_writes"): $writes"
+            disk_smart_add "total_writes" "$writes"
+        fi
+
+        # Percentage used
+        local pct_used=$(echo "$smart_all" | grep -i "Percentage Used" | grep -oE '[0-9]+' | head -1)
+        if [[ -n "$pct_used" ]]; then
+            echo "│   $(get_label "percentage_used"): ${pct_used}%"
+            echo "│   $(get_label "health_status"): $((100 - pct_used))%"
+            disk_smart_add "percentage_used" "$pct_used"
+            disk_smart_add "health_status" "$((100 - pct_used))"
+        fi
+
+        # Available spare
+        local spare=$(echo "$smart_all" | grep -i "Available Spare:" | grep -oE '[0-9]+' | head -1)
+        if [[ -n "$spare" ]]; then
+            echo "│   $(get_label "available_spare"): ${spare}%"
+            disk_smart_add "available_spare" "$spare"
+        fi
+    fi
+
+    # ==========================================================================
+    # Bad Blocks Detection (Text Parsing Fallback)
+    # ==========================================================================
+    # Call the universal bad blocks detection function with text input
+    # ==========================================================================
+    detect_bad_blocks "text" "$smart_all"
+
+    return 0
+}
+
+# Function to get disk information with enhanced SMART data
+# Display structure:
+#   1. First: RAID controllers and their member disks (grouped by controller)
+#   2. Then: Other disks (NVMe, non-RAID SATA/SAS, etc.)
+get_disk_info() {
+    print_subsection "$(get_label "disk_info")"
+
+    JSON_DISKS=()
+    JSON_RAID_CONTROLLERS=()
+
+    # Disk usage
+    df -h | grep -E '^/dev/' | while IFS= read -r line; do
+        echo "│ $line"
+    done
+
+    # Check smartctl version for JSON support (7.0+)
+    local smartctl_available=false
+    local use_json=false
+    if command -v smartctl >/dev/null 2>&1; then
+        smartctl_available=true
+        local smartctl_version=$(smartctl --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+        if [[ -n "$smartctl_version" ]]; then
+            local major_version=$(echo "$smartctl_version" | cut -d. -f1)
+            [[ "$major_version" -ge 7 ]] && use_json=true
+        fi
+    fi
+
+    # Cache disk names to avoid repeated lsblk calls
+    local disk_names=()
+    if command -v lsblk >/dev/null 2>&1; then
+        while IFS= read -r disk; do
+            [[ -n "$disk" ]] && disk_names+=("$disk")
+        done < <(lsblk -d -n -o NAME 2>/dev/null)
+    fi
+
+    # ==========================================================================
+    # PART 1: RAID Controllers and Member Disks
+    # ==========================================================================
+    # Get unique RAID controller devices first
+    local controller_devices=""
+    if [[ "$smartctl_available" == true ]]; then
+        controller_devices=$(get_raid_controller_devices)
+    fi
+
+    if [[ -n "$controller_devices" ]]; then
+        echo "│"
+        if [[ "$LANG_MODE" == "cn" ]]; then
+            print_color "$GREEN" "│ ═══════════════════════════════════════════════════"
+            print_color "$GREEN" "│ RAID 控制器及成员磁盘"
+            print_color "$GREEN" "│ ═══════════════════════════════════════════════════"
+        else
+            print_color "$GREEN" "│ ═══════════════════════════════════════════════════"
+            print_color "$GREEN" "│ RAID Controllers & Member Disks"
+            print_color "$GREEN" "│ ═══════════════════════════════════════════════════"
+        fi
+
+        local controller_num=0
+        while IFS= read -r controller_dev; do
+            [[ -z "$controller_dev" ]] && continue
+            ((controller_num++))
+
+            # Try to get controller info from any RAID member
+            local raid_devs=$(get_raid_member_devices "")
+            local controller_vendor=""
+            local controller_product=""
+
+            # Find first device belonging to this controller to get info
+            while IFS= read -r entry; do
+                [[ -z "$entry" ]] && continue
+                local device=$(echo "$entry" | cut -d: -f1)
+                local raid_type=$(echo "$entry" | cut -d: -f2)
+                local raid_id=$(echo "$entry" | cut -d: -f3)
+
+                if [[ "$device" == "$controller_dev" ]]; then
+                    # Get controller info from this device
+                    local json_data=$(get_smart_json_raid "$device" "$raid_type" "$raid_id")
+                    if [[ -n "$json_data" ]]; then
+                        controller_vendor=$(json_query '.scsi_vendor' "$json_data" || true)
+                        controller_product=$(json_query '.scsi_product' "$json_data" || true)
+                        [[ -z "$controller_vendor" ]] && controller_vendor=$(echo "$json_data" | grep -oP '"scsi_vendor"\s*:\s*"\K[^"]*' | head -1)
+                        [[ -z "$controller_product" ]] && controller_product=$(echo "$json_data" | grep -oP '"scsi_product"\s*:\s*"\K[^"]*' | head -1)
+                    fi
+                    break
+                fi
+            done <<< "$raid_devs"
+
+            # Display controller header
+            echo "│"
+            if [[ "$LANG_MODE" == "cn" ]]; then
+                if [[ -n "$controller_vendor" || -n "$controller_product" ]]; then
+                    print_color "$YELLOW" "│ ══ RAID 控制器 $controller_num: $controller_vendor $controller_product ══"
+                else
+                    print_color "$YELLOW" "│ ══ RAID 控制器 $controller_num: $controller_dev ══"
+                fi
+                echo "│   设备路径: $controller_dev"
+            else
+                if [[ -n "$controller_vendor" || -n "$controller_product" ]]; then
+                    print_color "$YELLOW" "│ ══ RAID Controller $controller_num: $controller_vendor $controller_product ══"
+                else
+                    print_color "$YELLOW" "│ ══ RAID Controller $controller_num: $controller_dev ══"
+                fi
+                echo "│   Device Path: $controller_dev"
+            fi
+
+            local controller_kv=(
+                "$(json_kv "device" "$controller_dev")"
+            )
+            [[ -n "$controller_vendor" ]] && controller_kv+=("$(json_kv "vendor" "$controller_vendor")")
+            [[ -n "$controller_product" ]] && controller_kv+=("$(json_kv "product" "$controller_product")")
+            JSON_RAID_CONTROLLERS+=("$(json_obj "${controller_kv[@]}")")
+
+            # Display member disks for this controller
+            display_megaraid_disks "" "$controller_dev"
+
+        done <<< "$controller_devices"
+    fi
+
+    # ==========================================================================
+    # PART 2: System/Virtual Disks (RAID VDs)
+    # ==========================================================================
+    # Collect RAID virtual disk list (for display)
+    local raid_vd_list=""
+    for disk in "${disk_names[@]}"; do
+        if [[ ! "$disk" =~ ^[sv]d[a-z]+$ ]]; then
+            continue
+        fi
+        if [[ "$smartctl_available" == true && "$use_json" == true ]]; then
+            local json_data=$(get_smart_json "$disk")
+            if [[ -n "$json_data" ]] && is_raid_controller_disk "$disk" "$json_data"; then
+                raid_vd_list="$raid_vd_list $disk"
+            fi
+        fi
+    done
+
+    # Only show this section if there are RAID VDs
+    if [[ -n "$raid_vd_list" ]]; then
+        echo "│"
+        if [[ "$LANG_MODE" == "cn" ]]; then
+            print_color "$GREEN" "│ ═══════════════════════════════════════════════════"
+            print_color "$GREEN" "│ RAID 虚拟磁盘 (VD/直通)"
+            print_color "$GREEN" "│ ═══════════════════════════════════════════════════"
+        else
+            print_color "$GREEN" "│ ═══════════════════════════════════════════════════"
+            print_color "$GREEN" "│ RAID Virtual Disks (VD/Passthrough)"
+            print_color "$GREEN" "│ ═══════════════════════════════════════════════════"
+        fi
+
+        for disk in $raid_vd_list; do
+            echo "│"
+            print_color "$CYAN" "│ ─── /dev/$disk ───"
+
+            # Basic disk information
+            local disk_info=$(lsblk -d -n -o SIZE,MODEL,VENDOR "/dev/$disk" 2>/dev/null | sed 's/  */ /g')
+            echo "│   Basic Info: $disk_info"
+
+            local json_data=$(get_smart_json "$disk")
+            local scsi_vendor=$(json_query '.scsi_vendor' "$json_data" || true)
+            local scsi_product=$(json_query '.scsi_product' "$json_data" || true)
+            [[ -z "$scsi_vendor" ]] && scsi_vendor=$(echo "$json_data" | grep -oP '"scsi_vendor"\s*:\s*"\K[^"]*' | head -1)
+            [[ -z "$scsi_product" ]] && scsi_product=$(echo "$json_data" | grep -oP '"scsi_product"\s*:\s*"\K[^"]*' | head -1)
+
+            if [[ "$LANG_MODE" == "cn" ]]; then
+                echo "│   控制器: $scsi_vendor $scsi_product"
+            else
+                echo "│   Controller: $scsi_vendor $scsi_product"
+            fi
+
+            DISK_JSON_EXTRA=()
+            disk_smart_reset
+            disk_extra_add "controller_vendor" "$scsi_vendor"
+            disk_extra_add "controller_product" "$scsi_product"
+            disk_json_add "raid_virtual" "/dev/$disk" "$disk_info"
+        done
+    fi
+
+    # ==========================================================================
+    # PART 3: Other Disks (NVMe, non-RAID SATA/SAS, MMC, etc.)
+    # ==========================================================================
+    echo "│"
+    if [[ "$LANG_MODE" == "cn" ]]; then
+        print_color "$GREEN" "│ ═══════════════════════════════════════════════════"
+        print_color "$GREEN" "│ 其他磁盘 (NVMe / SATA / SAS)"
+        print_color "$GREEN" "│ ═══════════════════════════════════════════════════"
+    else
+        print_color "$GREEN" "│ ═══════════════════════════════════════════════════"
+        print_color "$GREEN" "│ Other Disks (NVMe / SATA / SAS)"
+        print_color "$GREEN" "│ ═══════════════════════════════════════════════════"
+    fi
+
+    local other_disk_count=0
+    local other_disk_regex='^[sv]d[a-z]+$|^nvme[0-9]+n[0-9]+$|^mmcblk[0-9]+$'
+
+    # Physical disk information with enhanced details
+    for disk in "${disk_names[@]}"; do
+        if [[ ! "$disk" =~ $other_disk_regex ]]; then
+            continue
+        fi
+        # Skip RAID virtual disks (already shown in Part 2)
+        if [[ " $raid_vd_list " =~ " $disk " ]]; then
+            continue
+        fi
+
+        ((other_disk_count++))
+        echo "│"
+        print_color "$CYAN" "│ ═══ /dev/$disk ═══"
+
+        # Basic disk information
+        local disk_info=$(lsblk -d -n -o SIZE,MODEL,VENDOR "/dev/$disk" 2>/dev/null | sed 's/  */ /g')
+        echo "│   Basic Info: $disk_info"
+
+        DISK_JSON_EXTRA=()
+        disk_smart_reset
+
+        # SMART information
+        if [[ "$smartctl_available" == true ]]; then
+            # Try JSON parsing first (more reliable)
+            local parsed=false
+            if [[ "$use_json" == true ]]; then
+                local json_data=$(get_smart_json "$disk")
+                if [[ -n "$json_data" ]]; then
+                    parse_smart_json "$disk" "$json_data" && parsed=true
+                fi
+            fi
+
+            # Fallback to text parsing
+            if [[ "$parsed" == false ]]; then
+                parse_smart_text "$disk" || echo "│   SMART: $(get_label "not_detected")"
+            fi
+        else
+            # smartctl not installed
+            if [[ "$LANG_MODE" == "cn" ]]; then
+                echo "│   SMART状态: smartctl未安装"
+            else
+                echo "│   SMART Status: smartctl not installed"
+            fi
+        fi
+
+        disk_json_add "other" "/dev/$disk" "$disk_info"
+    done
+
+    if [[ "$other_disk_count" -eq 0 ]]; then
+        if [[ "$LANG_MODE" == "cn" ]]; then
+            echo "│   (无其他磁盘)"
+        else
+            echo "│   (No other disks)"
+        fi
+    fi
+
+    echo "└$(repeat_char '─' 50)"
+}
+
+# Function to check whether fio is the benchmark tool
+is_fio_benchmark_available() {
+    command -v fio >/dev/null 2>&1 || return 1
+    fio --version 2>/dev/null | grep -qi '^fio-'
+}
+
+# Function to format IOPS with compact units
+format_iops() {
+    local iops="$1"
+    awk -v n="${iops:-0}" 'BEGIN {
+        if (n >= 1000000) {
+            printf "%.1fm", n / 1000000
+        } else if (n >= 1000) {
+            printf "%.1fk", n / 1000
+        } else {
+            printf "%.0f", n
+        }
+    }'
+}
+
+block_size_to_bytes() {
+    local block_size="$1"
+    local number="${block_size%[kKmM]}"
+    local suffix="${block_size:${#number}}"
+
+    [[ "$number" =~ ^[0-9]+$ ]] || return 1
+    case "$suffix" in
+        k|K)
+            echo $((number * 1024))
+            ;;
+        m|M)
+            echo $((number * 1024 * 1024))
+            ;;
+        "")
+            echo "$number"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+format_benchmark_bw() {
+    local bytes="$1"
+    local elapsed_ms="$2"
+    local bw_bytes=""
+
+    if [[ "$bytes" =~ ^[0-9]+$ && "$elapsed_ms" =~ ^[0-9]+$ && "$elapsed_ms" -gt 0 ]]; then
+        bw_bytes=$((bytes * 1000 / elapsed_ms))
+        printf '%s|%s' "$bw_bytes" "$(format_bytes "$bw_bytes")/s"
+    else
+        printf '|'
+    fi
+}
+
+# Function to determine whether a mount is backed by a local disk-like source
+is_local_disk_mount() {
+    local source="$1"
+    local fstype="$2"
+
+    case "$fstype" in
+        proc|sysfs|tmpfs|devtmpfs|devpts|cgroup*|pstore|securityfs|debugfs|tracefs|configfs|mqueue|hugetlbfs|bpf|fusectl|overlay|squashfs|autofs|nfs|nfs4|cifs|smb3|sshfs|fuse.sshfs|9p)
+            return 1
+            ;;
+    esac
+
+    case "$source" in
+        /dev/*|UUID=*|LABEL=*|PARTUUID=*|ZFS=*|rpool/*|tank/*)
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+# Function to run a fio read/write benchmark for one block size
+run_fio_rw_benchmark() {
+    local mount_point="$1"
+    local block_size="$2"
+    local test_file=""
+    local fio_json=""
+    local read_bw_bytes=""
+    local write_bw_bytes=""
+    local total_bw_bytes=""
+    local read_iops=""
+    local write_iops=""
+    local total_iops=""
+    local read_bw_display=""
+    local write_bw_display=""
+    local total_bw_display=""
+    local read_iops_display=""
+    local write_iops_display=""
+    local total_iops_display=""
+
+    test_file=$(mktemp "${mount_point%/}/.sick-fio-${block_size}.XXXXXX" 2>/dev/null) || {
+        echo "failed|$block_size|||||||||mktemp failed"
+        return
+    }
+    TEMP_FILES+=("$test_file")
+    rm -f "$test_file"
+
+    fio_json=$(fio --name="sick-rw-${block_size}" --filename="$test_file" --rw=readwrite --rwmixread=50 --bs="$block_size" --size="${IO_TEST_SIZE_MB}M" --iodepth=16 --numjobs=1 --direct=1 --ioengine=libaio --group_reporting --output-format=json 2>/dev/null)
+    local rc=$?
+    if [[ $rc -ne 0 || -z "$fio_json" ]]; then
+        fio_json=$(fio --name="sick-rw-${block_size}" --filename="$test_file" --rw=readwrite --rwmixread=50 --bs="$block_size" --size="${IO_TEST_SIZE_MB}M" --iodepth=1 --numjobs=1 --direct=0 --ioengine=sync --group_reporting --output-format=json 2>/dev/null)
+        rc=$?
+    fi
+    rm -f "$test_file"
+
+    if [[ $rc -ne 0 || -z "$fio_json" ]]; then
+        echo "failed|$block_size|||||||||fio failed"
+        return
+    fi
+
+    read_bw_bytes=$(json_query '.jobs[0].read.bw_bytes' "$fio_json" || true)
+    write_bw_bytes=$(json_query '.jobs[0].write.bw_bytes' "$fio_json" || true)
+    read_iops=$(json_query '.jobs[0].read.iops' "$fio_json" || true)
+    write_iops=$(json_query '.jobs[0].write.iops' "$fio_json" || true)
+
+    if [[ ! "$read_bw_bytes" =~ ^[0-9]+$ || ! "$write_bw_bytes" =~ ^[0-9]+$ ]]; then
+        echo "failed|$block_size|||||||||fio parse failed"
+        return
+    fi
+
+    total_bw_bytes=$((read_bw_bytes + write_bw_bytes))
+    total_iops=$(awk -v r="${read_iops:-0}" -v w="${write_iops:-0}" 'BEGIN { printf "%.1f", r + w }')
+    read_bw_display="$(format_bytes "$read_bw_bytes")/s"
+    write_bw_display="$(format_bytes "$write_bw_bytes")/s"
+    total_bw_display="$(format_bytes "$total_bw_bytes")/s"
+    read_iops_display="$(format_iops "$read_iops")"
+    write_iops_display="$(format_iops "$write_iops")"
+    total_iops_display="$(format_iops "$total_iops")"
+
+    echo "passed|$block_size|$read_bw_display|$read_iops_display|$write_bw_display|$write_iops_display|$total_bw_display|$total_iops_display|$read_bw_bytes|$write_bw_bytes|$total_bw_bytes|$read_iops|$write_iops|$total_iops|"
+}
+
+# Function to run a quick fallback write test when fio is unavailable
+run_dd_write_test() {
+    local mount_point="$1"
+    local test_file=""
+    local start_ns=""
+    local end_ns=""
+    local elapsed_ms=""
+    local bytes=$((IO_TEST_SIZE_MB * 1024 * 1024))
+    local bw_bytes=""
+    local bw_display=""
+
+    test_file=$(mktemp "${mount_point%/}/.sick-dd.XXXXXX" 2>/dev/null) || {
+        echo "failed|dd|||mktemp failed"
+        return
+    }
+    TEMP_FILES+=("$test_file")
+
+    start_ns=$(date +%s%N)
+    if ! dd if=/dev/zero of="$test_file" bs=1M count="$IO_TEST_SIZE_MB" conv=fdatasync status=none 2>/dev/null; then
+        rm -f "$test_file"
+        echo "failed|dd|||write failed"
+        return
+    fi
+    end_ns=$(date +%s%N)
+    rm -f "$test_file"
+
+    if [[ "$start_ns" =~ ^[0-9]+$ && "$end_ns" =~ ^[0-9]+$ && "$end_ns" -gt "$start_ns" ]]; then
+        elapsed_ms=$(((end_ns - start_ns) / 1000000))
+        if [[ "$elapsed_ms" -gt 0 ]]; then
+            bw_bytes=$((bytes * 1000 / elapsed_ms))
+            bw_display="$(format_bytes "$bw_bytes")/s"
+        fi
+    fi
+
+    echo "passed|dd|$bw_display||"
+}
+
+# Function to run a dd read/write fallback benchmark for one block size
+run_dd_rw_benchmark() {
+    local mount_point="$1"
+    local block_size="$2"
+    local test_file=""
+    local block_bytes=""
+    local dd_block_size="${block_size^^}"
+    local total_bytes=$((IO_TEST_SIZE_MB * 1024 * 1024))
+    local count=""
+    local start_ns="" end_ns="" write_ms="" read_ms=""
+    local write_bw_bytes="" write_bw_display=""
+    local read_bw_bytes="" read_bw_display=""
+    local total_bw_bytes="" total_bw_display=""
+    local read_iops="" write_iops="" total_iops=""
+    local read_iops_display="" write_iops_display="" total_iops_display=""
+
+    block_bytes=$(block_size_to_bytes "$block_size") || {
+        echo "failed|$block_size|||||||||invalid block size"
+        return
+    }
+    [[ "$block_bytes" -gt 0 ]] || {
+        echo "failed|$block_size|||||||||invalid block size"
+        return
+    }
+
+    count=$((total_bytes / block_bytes))
+    [[ "$count" -lt 1 ]] && count=1
+    total_bytes=$((count * block_bytes))
+
+    test_file=$(mktemp "${mount_point%/}/.sick-dd-${block_size}.XXXXXX" 2>/dev/null) || {
+        echo "failed|$block_size|||||||||mktemp failed"
+        return
+    }
+    TEMP_FILES+=("$test_file")
+
+    start_ns=$(date +%s%N)
+    if ! dd if=/dev/zero of="$test_file" bs="$dd_block_size" count="$count" conv=fdatasync status=none 2>/dev/null; then
+        rm -f "$test_file"
+        echo "failed|$block_size|||||||||write failed"
+        return
+    fi
+    end_ns=$(date +%s%N)
+    write_ms=$(((end_ns - start_ns) / 1000000))
+    [[ "$write_ms" -lt 1 ]] && write_ms=1
+
+    start_ns=$(date +%s%N)
+    if ! dd if="$test_file" of=/dev/null bs="$dd_block_size" status=none 2>/dev/null; then
+        rm -f "$test_file"
+        echo "failed|$block_size|||||||||read failed"
+        return
+    fi
+    end_ns=$(date +%s%N)
+    read_ms=$(((end_ns - start_ns) / 1000000))
+    [[ "$read_ms" -lt 1 ]] && read_ms=1
+    rm -f "$test_file"
+
+    IFS='|' read -r write_bw_bytes write_bw_display < <(format_benchmark_bw "$total_bytes" "$write_ms")
+    IFS='|' read -r read_bw_bytes read_bw_display < <(format_benchmark_bw "$total_bytes" "$read_ms")
+
+    if [[ ! "$read_bw_bytes" =~ ^[0-9]+$ || ! "$write_bw_bytes" =~ ^[0-9]+$ ]]; then
+        echo "failed|$block_size|||||||||timing failed"
+        return
+    fi
+
+    total_bw_bytes=$((read_bw_bytes + write_bw_bytes))
+    total_bw_display="$(format_bytes "$total_bw_bytes")/s"
+    read_iops=$(awk -v b="$read_bw_bytes" -v bs="$block_bytes" 'BEGIN { printf "%.1f", b / bs }')
+    write_iops=$(awk -v b="$write_bw_bytes" -v bs="$block_bytes" 'BEGIN { printf "%.1f", b / bs }')
+    total_iops=$(awk -v r="$read_iops" -v w="$write_iops" 'BEGIN { printf "%.1f", r + w }')
+    read_iops_display="$(format_iops "$read_iops")"
+    write_iops_display="$(format_iops "$write_iops")"
+    total_iops_display="$(format_iops "$total_iops")"
+
+    echo "passed|$block_size|$read_bw_display|$read_iops_display|$write_bw_display|$write_iops_display|$total_bw_display|$total_iops_display|$read_bw_bytes|$write_bw_bytes|$total_bw_bytes|$read_iops|$write_iops|$total_iops|"
+}
+
+# Function to print fio benchmark rows as two side-by-side block-size tables
+print_io_benchmark_pair() {
+    local left_row="$1"
+    local right_row="$2"
+    local l_status="" l_bs="" l_read_bw="" l_read_iops="" l_write_bw="" l_write_iops="" l_total_bw="" l_total_iops=""
+    local r_status="" r_bs="" r_read_bw="" r_read_iops="" r_write_bw="" r_write_iops="" r_total_bw="" r_total_iops=""
+
+    IFS='|' read -r l_status l_bs l_read_bw l_read_iops l_write_bw l_write_iops l_total_bw l_total_iops _ <<< "$left_row"
+    IFS='|' read -r r_status r_bs r_read_bw r_read_iops r_write_bw r_write_iops r_total_bw r_total_iops _ <<< "$right_row"
+
+    if [[ "$l_status" != "passed" || "$r_status" != "passed" ]]; then
+        return
+    fi
+
+    printf "│   %-10s | %-24s | %-24s\n" "Block Size" "$l_bs (IOPS)" "$r_bs (IOPS)"
+    printf "│   %-10s | %-24s | %-24s\n" "------" "--- ----" "--- ----"
+    printf "│   %-10s | %-24s | %-24s\n" "Read" "$l_read_bw ($l_read_iops)" "$r_read_bw ($r_read_iops)"
+    printf "│   %-10s | %-24s | %-24s\n" "Write" "$l_write_bw ($l_write_iops)" "$r_write_bw ($r_write_iops)"
+    printf "│   %-10s | %-24s | %-24s\n" "Total" "$l_total_bw ($l_total_iops)" "$r_total_bw ($r_total_iops)"
+}
+
+# Function to fit a string into a fixed-width ASCII table cell
+fit_cell() {
+    local value="$1"
+    local width="$2"
+
+    if (( ${#value} > width )); then
+        printf '%s' "${value:0:$((width - 2))}.."
+    else
+        printf '%s' "$value"
+    fi
+}
+
+print_io_mount_table_header() {
+    printf "│ %-18s | %-18s | %-8s | %-10s | %-8s\n" "Mount Point" "Source" "FS" "Type" "Writable"
+    printf "│ %-18s | %-18s | %-8s | %-10s | %-8s\n" "------------------" "------------------" "--------" "----------" "--------"
+}
+
+print_io_mount_table_row() {
+    local mount_point="$1"
+    local source="$2"
+    local fstype="$3"
+    local target_type="$4"
+    local writable="$5"
+
+    printf "│ %-18s | %-18s | %-8s | %-10s | %-8s\n" \
+        "$(fit_cell "$mount_point" 18)" \
+        "$(fit_cell "$source" 18)" \
+        "$(fit_cell "$fstype" 8)" \
+        "$(fit_cell "$target_type" 10)" \
+        "$(fit_cell "$writable" 8)"
+}
+
+# Function to get mounted disk I/O capability and optional read/write-test results
+get_io_info() {
+    print_subsection "$(get_label "io_info")"
+
+    JSON_IO_KV=()
+    JSON_IO_MOUNTS=()
+
+    local fio_available="No"
+    local write_tests_enabled="No"
+    local fio_status_display=""
+    local write_test_display=""
+    local mount_entries=""
+    local mount_count=0
+
+    if is_fio_benchmark_available; then
+        fio_available="Yes"
+    fi
+    [[ "$RUN_IO_TEST" == true ]] && write_tests_enabled="Yes"
+
+    if [[ "$fio_available" == "Yes" ]]; then
+        fio_status_display="Available"
+    elif [[ "$RUN_IO_TEST" == true ]]; then
+        fio_status_display="Not installed (dd fallback)"
+    else
+        fio_status_display="Not installed (use --io-test to install/test)"
+    fi
+
+    if [[ "$RUN_IO_TEST" == true ]]; then
+        write_test_display="Enabled"
+    else
+        write_test_display="Disabled (use --io-test)"
+    fi
+
+    print_info "$(get_label "fio_status")" "$fio_status_display"
+    print_info "$(get_label "write_test")" "$write_test_display"
+
+    JSON_IO_KV=(
+        "$(json_kv "fio_available" "$fio_available")"
+        "$(json_kv "write_tests_enabled" "$write_tests_enabled")"
+        "$(json_kv "test_size_mb" "$IO_TEST_SIZE_MB")"
+    )
+
+    if command -v findmnt >/dev/null 2>&1; then
+        mount_entries=$(findmnt -rn -o TARGET,SOURCE,FSTYPE,OPTIONS 2>/dev/null)
+    else
+        mount_entries=$(awk '{print $2 " " $1 " " $3 " " $4}' /proc/mounts 2>/dev/null)
+    fi
+
+    if [[ "$RUN_IO_TEST" != true ]]; then
+        echo "│"
+        print_io_mount_table_header
+    fi
+
+    while read -r mount_point source fstype options; do
+        [[ -z "$mount_point" || -z "$source" || -z "$fstype" ]] && continue
+        is_local_disk_mount "$source" "$fstype" || continue
+
+        local local_disk="Yes"
+        local option_writable="Yes"
+        local permission_writable="No"
+        local writable="No"
+        local target_type="other"
+        local test_status="not_run"
+        local test_tool=""
+        local test_bw=""
+        local test_iops=""
+        local test_error=""
+        local benchmark_rows=()
+        local benchmark_json=()
+
+        ((mount_count++))
+
+        if [[ -d "$mount_point" ]]; then
+            target_type="directory"
+        elif [[ -f "$mount_point" ]]; then
+            target_type="file"
+        fi
+
+        if [[ ",$options," == *,ro,* ]]; then
+            option_writable="No"
+        fi
+        if [[ -w "$mount_point" ]]; then
+            permission_writable="Yes"
+        fi
+        if [[ "$option_writable" == "Yes" && "$permission_writable" == "Yes" ]]; then
+            writable="Yes"
+        fi
+
+        if [[ "$RUN_IO_TEST" == true ]]; then
+            if [[ "$target_type" != "directory" ]]; then
+                test_status="skipped_not_directory"
+            elif [[ "$writable" != "Yes" ]]; then
+                test_status="skipped_not_writable"
+            elif [[ "$fio_available" == "Yes" ]]; then
+                test_status="passed"
+                test_tool="fio"
+                for block_size in 4k 64k 512k 1m; do
+                    local bench_row=""
+                    local b_status="" b_bs="" b_read_bw="" b_read_iops="" b_write_bw="" b_write_iops="" b_total_bw="" b_total_iops=""
+                    local b_read_bw_bytes="" b_write_bw_bytes="" b_total_bw_bytes="" b_read_iops_raw="" b_write_iops_raw="" b_total_iops_raw="" b_error=""
+
+                    bench_row=$(run_fio_rw_benchmark "$mount_point" "$block_size")
+                    benchmark_rows+=("$bench_row")
+                    IFS='|' read -r b_status b_bs b_read_bw b_read_iops b_write_bw b_write_iops b_total_bw b_total_iops b_read_bw_bytes b_write_bw_bytes b_total_bw_bytes b_read_iops_raw b_write_iops_raw b_total_iops_raw b_error <<< "$bench_row"
+
+                    if [[ "$b_status" != "passed" ]]; then
+                        test_status="failed"
+                        test_error="${b_error:-fio failed}"
+                        continue
+                    fi
+
+                    local bench_kv=(
+                        "$(json_kv "block_size" "$b_bs")"
+                        "$(json_kv "read_bw" "$b_read_bw")"
+                        "$(json_kv "read_iops" "$b_read_iops")"
+                        "$(json_kv "write_bw" "$b_write_bw")"
+                        "$(json_kv "write_iops" "$b_write_iops")"
+                        "$(json_kv "total_bw" "$b_total_bw")"
+                        "$(json_kv "total_iops" "$b_total_iops")"
+                        "$(json_kv "read_bw_bytes" "$b_read_bw_bytes")"
+                        "$(json_kv "write_bw_bytes" "$b_write_bw_bytes")"
+                        "$(json_kv "total_bw_bytes" "$b_total_bw_bytes")"
+                        "$(json_kv "read_iops_raw" "$b_read_iops_raw")"
+                        "$(json_kv "write_iops_raw" "$b_write_iops_raw")"
+                        "$(json_kv "total_iops_raw" "$b_total_iops_raw")"
+                    )
+                    benchmark_json+=("$(json_obj "${bench_kv[@]}")")
+                done
+            else
+                test_status="passed"
+                test_tool="dd"
+                for block_size in 4k 64k 512k 1m; do
+                    local bench_row=""
+                    local b_status="" b_bs="" b_read_bw="" b_read_iops="" b_write_bw="" b_write_iops="" b_total_bw="" b_total_iops=""
+                    local b_read_bw_bytes="" b_write_bw_bytes="" b_total_bw_bytes="" b_read_iops_raw="" b_write_iops_raw="" b_total_iops_raw="" b_error=""
+
+                    bench_row=$(run_dd_rw_benchmark "$mount_point" "$block_size")
+                    benchmark_rows+=("$bench_row")
+                    IFS='|' read -r b_status b_bs b_read_bw b_read_iops b_write_bw b_write_iops b_total_bw b_total_iops b_read_bw_bytes b_write_bw_bytes b_total_bw_bytes b_read_iops_raw b_write_iops_raw b_total_iops_raw b_error <<< "$bench_row"
+
+                    if [[ "$b_status" != "passed" ]]; then
+                        test_status="failed"
+                        test_error="${b_error:-dd failed}"
+                        continue
+                    fi
+
+                    local bench_kv=(
+                        "$(json_kv "block_size" "$b_bs")"
+                        "$(json_kv "read_bw" "$b_read_bw")"
+                        "$(json_kv "read_iops" "$b_read_iops")"
+                        "$(json_kv "write_bw" "$b_write_bw")"
+                        "$(json_kv "write_iops" "$b_write_iops")"
+                        "$(json_kv "total_bw" "$b_total_bw")"
+                        "$(json_kv "total_iops" "$b_total_iops")"
+                        "$(json_kv "read_bw_bytes" "$b_read_bw_bytes")"
+                        "$(json_kv "write_bw_bytes" "$b_write_bw_bytes")"
+                        "$(json_kv "total_bw_bytes" "$b_total_bw_bytes")"
+                        "$(json_kv "read_iops_raw" "$b_read_iops_raw")"
+                        "$(json_kv "write_iops_raw" "$b_write_iops_raw")"
+                        "$(json_kv "total_iops_raw" "$b_total_iops_raw")"
+                    )
+                    benchmark_json+=("$(json_obj "${bench_kv[@]}")")
+                done
+            fi
+        fi
+
+        if [[ "$RUN_IO_TEST" != true ]]; then
+            print_io_mount_table_row "$mount_point" "$source" "$fstype" "$target_type" "$writable"
+        else
+            echo "│"
+            print_color "$CYAN" "│ ═══ $mount_point ═══"
+            echo "│   Source: $source"
+            echo "│   $(get_label "filesystem"): $fstype"
+            echo "│   Target Type: $target_type"
+            echo "│   $(get_label "local_disk"): $local_disk"
+            echo "│   $(get_label "writable"): $writable"
+            echo "│   $(get_label "write_test"): $test_status${test_tool:+ ($test_tool)}"
+            if [[ ( "$test_tool" == "fio" || "$test_tool" == "dd" ) && ${#benchmark_rows[@]} -eq 4 ]]; then
+                print_io_benchmark_pair "${benchmark_rows[0]}" "${benchmark_rows[1]}"
+                echo "│"
+                print_io_benchmark_pair "${benchmark_rows[2]}" "${benchmark_rows[3]}"
+            else
+                [[ -n "$test_bw" ]] && echo "│   Write BW: $test_bw"
+                [[ -n "$test_iops" ]] && echo "│   Write IOPS: $test_iops"
+            fi
+            [[ -n "$test_error" ]] && echo "│   Error: $test_error"
+        fi
+
+        local mount_kv=(
+            "$(json_kv "mount_point" "$mount_point")"
+            "$(json_kv "source" "$source")"
+            "$(json_kv "filesystem" "$fstype")"
+            "$(json_kv "options" "$options")"
+            "$(json_kv "target_type" "$target_type")"
+            "$(json_kv "local_disk" "$local_disk")"
+            "$(json_kv "writable" "$writable")"
+            "$(json_kv "write_test_status" "$test_status")"
+        )
+        [[ -n "$test_tool" ]] && mount_kv+=("$(json_kv "write_test_tool" "$test_tool")")
+        [[ -n "$test_bw" ]] && mount_kv+=("$(json_kv "write_bandwidth" "$test_bw")")
+        [[ -n "$test_iops" ]] && mount_kv+=("$(json_kv "write_iops" "$test_iops")")
+        [[ -n "$test_error" ]] && mount_kv+=("$(json_kv "write_error" "$test_error")")
+        if [[ ${#benchmark_json[@]} -gt 0 ]]; then
+            mount_kv+=("$(json_kv_raw "benchmarks" "$(json_array "${benchmark_json[@]}")")")
+        fi
+        JSON_IO_MOUNTS+=("$(json_obj "${mount_kv[@]}")")
+    done <<< "$mount_entries"
+
+    if [[ "$mount_count" -eq 0 ]]; then
+        print_info "$(get_label "status")" "$(get_label "not_detected")"
+    fi
+
+    echo "└$(repeat_char '─' 50)"
+}
+
+# Function to get RAID information
+get_raid_info() {
+    print_subsection "$(get_label "raid_info")"
+    
+    local raid_found=false
+    JSON_RAID_SW=()
+    JSON_RAID_HW=()
+    
+    # Check for software RAID
+    if [[ -f /proc/mdstat ]]; then
+        local md_info=$(cat /proc/mdstat | grep -E '^md[0-9]')
+        if [[ -n "$md_info" ]]; then
+            echo "│ Software RAID:"
+            while IFS= read -r line; do
+                echo "│   $line"
+                JSON_RAID_SW+=("$line")
+            done <<< "$md_info"
+            raid_found=true
+        fi
+    fi
+    
+    # Check for hardware RAID controllers
+    if command -v lspci >/dev/null 2>&1; then
+        local raid_controllers=$(lspci | grep -i raid)
+        if [[ -n "$raid_controllers" ]]; then
+            echo "│ Hardware RAID Controllers:"
+            while IFS= read -r line; do
+                echo "│   $line"
+                JSON_RAID_HW+=("$line")
+            done <<< "$raid_controllers"
+            raid_found=true
+        fi
+    fi
+    
+    if [[ "$raid_found" == false ]]; then
+        print_info "$(get_label "status")" "$(get_label "not_detected")"
+    fi
+    
+    echo "└$(repeat_char '─' 50)"
+}
+
+# Function to mask IP addresses for privacy
+mask_ip_address() {
+    local ip="$1"
+    
+    if [[ -z "$ip" ]]; then
+        echo ""
+        return
+    fi
+    
+    # Handle IPv4 addresses (e.g., 192.168.1.100/24 -> 192.168.XX.XX/24)
+    if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+        # Extract the network part (CIDR notation)
+        local ip_part="${ip%/*}"
+        local cidr_part=""
+        if [[ "$ip" =~ / ]]; then
+            cidr_part="/${ip#*/}"
+        fi
+        
+        # Split IP into octets
+        IFS='.' read -ra octets <<< "$ip_part"
+        if [[ ${#octets[@]} -eq 4 ]]; then
+            echo "${octets[0]}.${octets[1]}.XX.XX${cidr_part}"
+        else
+            echo "$ip"
+        fi
+    # Handle IPv6 addresses (e.g., 2001:41d0:727:3000:: -> 2001:41d0:XX:XX::)
+    elif [[ "$ip" =~ : ]]; then
+        # Extract the network part (CIDR notation)
+        local ip_part="${ip%/*}"
+        local cidr_part=""
+        if [[ "$ip" =~ / ]]; then
+            cidr_part="/${ip#*/}"
+        fi
+        
+        # Split IPv6 into segments
+        IFS=':' read -ra segments <<< "$ip_part"
+        if [[ ${#segments[@]} -ge 2 ]]; then
+            # Show first two segments, mask the rest
+            local result="${segments[0]}:${segments[1]}:XX:XX"
+            # Add :: if the original had it
+            if [[ "$ip_part" =~ :: ]]; then
+                result="${result}::"
+            fi
+            echo "${result}${cidr_part}"
+        else
+            echo "$ip"
+        fi
+    else
+        # Unknown format, return as-is
+        echo "$ip"
+    fi
+}
+
+# Function to mask MAC addresses for privacy
+mask_mac_address() {
+    local mac="$1"
+    
+    if [[ -z "$mac" ]]; then
+        echo ""
+        return
+    fi
+    
+    # Handle standard MAC address format (aa:bb:cc:dd:ee:ff or AA:BB:CC:DD:EE:FF)
+    if [[ "$mac" =~ ^([0-9a-fA-F]{2}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2})$ ]]; then
+        # Show first 3 octets (OUI - Organizationally Unique Identifier), mask last 3
+        # Format: aa:bb:cc:XX:XX:XX
+        echo "${BASH_REMATCH[1]}:${BASH_REMATCH[2]}:${BASH_REMATCH[3]}:XX:XX:XX"
+    # Handle MAC address with dashes (aa-bb-cc-dd-ee-ff)
+    elif [[ "$mac" =~ ^([0-9a-fA-F]{2})-([0-9a-fA-F]{2})-([0-9a-fA-F]{2})-([0-9a-fA-F]{2})-([0-9a-fA-F]{2})-([0-9a-fA-F]{2})$ ]]; then
+        # Show first 3 octets, mask last 3
+        # Format: aa-bb-cc-XX-XX-XX
+        echo "${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}-XX-XX-XX"
+    # Handle MAC address without separators (aabbccddee​ff)
+    elif [[ "$mac" =~ ^([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$ ]]; then
+        # Show first 3 octets, mask last 3
+        # Format: aabbccXXXXXX
+        echo "${BASH_REMATCH[1]}${BASH_REMATCH[2]}${BASH_REMATCH[3]}XXXXXX"
+    # Handle MAC address with dots (aaaa.bbbb.cccc)
+    elif [[ "$mac" =~ ^([0-9a-fA-F]{4})\.([0-9a-fA-F]{4})\.([0-9a-fA-F]{4})$ ]]; then
+        # Show first 6 characters (3 octets), mask last 6
+        # Format: aaaa.bbXX.XXXX
+        local first_part="${BASH_REMATCH[1]}"
+        local second_part="${BASH_REMATCH[2]}"
+        echo "${first_part}.${second_part:0:2}XX.XXXX"
+    else
+        # Unknown MAC format, try to mask generically if it looks like a MAC
+        if [[ ${#mac} -ge 12 ]] && [[ "$mac" =~ [0-9a-fA-F] ]]; then
+            # Generic masking: show first half, mask second half
+            local len=${#mac}
+            local half=$((len/2))
+            local first_half="${mac:0:$half}"
+            local masked_half=$(repeat_char 'X' $((len-half)))
+            echo "${first_half}${masked_half}"
+        else
+            # Return as-is if it doesn't look like a MAC address
+            echo "$mac"
+        fi
+    fi
+}
+
+# Function to check if interface is a physical network card
+is_physical_interface() {
+    local interface="$1"
+    
+    # Skip virtual/software interfaces
+    case "$interface" in
+        lo|lo:*)            return 1 ;;  # Loopback
+        docker*)            return 1 ;;  # Docker interfaces
+        br-*)               return 1 ;;  # Docker bridges
+        veth*)              return 1 ;;  # Virtual ethernet pairs (Docker containers)
+        virbr*)             return 1 ;;  # libvirt bridges
+        tun*|tap*)          return 1 ;;  # VPN tunnels
+        wg*)                return 1 ;;  # WireGuard VPN
+        vlan*)              return 1 ;;  # VLAN interfaces
+        bond*)              return 1 ;;  # Bonding interfaces (usually virtual)
+        team*)              return 1 ;;  # Team interfaces
+        dummy*)             return 1 ;;  # Dummy interfaces
+        sit*)               return 1 ;;  # IPv6 in IPv4 tunnels
+        gre*)               return 1 ;;  # GRE tunnels
+        ipip*)              return 1 ;;  # IP in IP tunnels
+        *@*)                return 1 ;;  # Interface pairs (e.g., veth123@if456)
+    esac
+    
+    # Accept physical interfaces (including InfiniBand)
+    case "$interface" in
+        eth*)               return 0 ;;  # Traditional ethernet naming
+        ens*|enp*|eno*)     return 0 ;;  # systemd predictable naming
+        ib*)                return 0 ;;  # InfiniBand cards (user requested)
+        wlan*|wlp*)         return 0 ;;  # Wireless cards
+        em*|p*p*)           return 0 ;;  # Additional physical interface patterns
+    esac
+    
+    # For unknown patterns, check if it has a physical device path
+    local device_path="/sys/class/net/$interface/device"
+    if [[ -L "$device_path" ]]; then
+        # Has a device symlink, likely physical
+        return 0
+    fi
+    
+    # Default: assume virtual if pattern doesn't match known physical types
+    return 1
+}
+
+# Function to get enhanced network information
+get_network_info() {
+    print_subsection "$(get_label "network_info")"
+
+    JSON_NETWORK=()
+    
+    local -a interfaces=()
+    declare -A iface_status
+    declare -A iface_ipv4
+    declare -A iface_ipv6
+    declare -A iface_mac
+
+    if command -v ip >/dev/null 2>&1; then
+        # Cache interface list, status, and MAC addresses
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            local tmp="${line#*: }"
+            local ifname="${tmp%%:*}"
+            local state="Unknown"
+            local mac=""
+            local parts=()
+
+            interfaces+=("$ifname")
+
+            read -r -a parts <<< "$line"
+            local idx=0
+            while (( idx < ${#parts[@]} )); do
+                case "${parts[$idx]}" in
+                    state)
+                        state="${parts[$((idx + 1))]}"
+                        ;;
+                    link/ether)
+                        mac="${parts[$((idx + 1))]}"
+                        ;;
+                esac
+                ((idx++))
+            done
+
+            iface_status[$ifname]="$state"
+            [[ -n "$mac" ]] && iface_mac[$ifname]="$mac"
+        done < <(ip -o link show 2>/dev/null)
+
+        # Cache IP addresses
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            local parts=()
+            read -r -a parts <<< "$line"
+            local ifname="${parts[1]}"
+            local family="${parts[2]}"
+            local addr="${parts[3]}"
+
+            if [[ "$family" == "inet" ]]; then
+                [[ -z "${iface_ipv4[$ifname]}" ]] && iface_ipv4[$ifname]="$addr"
+            elif [[ "$family" == "inet6" ]]; then
+                [[ -z "${iface_ipv6[$ifname]}" ]] && iface_ipv6[$ifname]="$addr"
+            fi
+        done < <(ip -o addr show 2>/dev/null)
+    fi
+
+    if [[ ${#interfaces[@]} -eq 0 ]]; then
+        for path in /sys/class/net/*; do
+            [[ ! -e "$path" ]] && break
+            interfaces+=("${path##*/}")
+        done
+    fi
+
+    # Network interfaces with enhanced information (physical only)
+    for interface in "${interfaces[@]}"; do
+        # Skip virtual interfaces
+        if ! is_physical_interface "$interface"; then
+            continue
+        fi
+        echo "│"
+        print_color "$CYAN" "│ ═══ $interface ═══"
+        
+        # Get PCI device path for this interface
+        local pci_path=""
+        local device_path="/sys/class/net/$interface/device"
+        if [[ -L "$device_path" ]]; then
+            local real_path=$(readlink -f "$device_path" 2>/dev/null)
+            if [[ -n "$real_path" ]]; then
+                pci_path=$(basename "$real_path")
+            fi
+        fi
+        
+        # Network card model/vendor information
+        local nic_model=""
+        local nic_vendor=""
+        local model_val=""
+        local device_id_val=""
+        
+        if [[ -n "$pci_path" ]] && command -v lspci >/dev/null 2>&1; then
+            local pci_info=$(lspci -s "$pci_path" 2>/dev/null | head -1)
+            if [[ -n "$pci_info" ]]; then
+                # Extract model info from lspci output
+                nic_model=$(echo "$pci_info" | cut -d':' -f3- | sed 's/^ *//')
+                echo "│   $(get_label "model"): $nic_model"
+                model_val="$nic_model"
+            fi
+        fi
+        
+        # Alternative method using ethtool
+        if [[ -z "$nic_model" ]] && command -v ethtool >/dev/null 2>&1; then
+            local ethtool_info=$(ethtool -i "$interface" 2>/dev/null)
+            if [[ -n "$ethtool_info" ]]; then
+                nic_vendor=$(echo "$ethtool_info" | grep "driver:" | cut -d':' -f2 | sed 's/^ *//')
+                local bus_info=$(echo "$ethtool_info" | grep "bus-info:" | cut -d':' -f2- | sed 's/^ *//')
+                if [[ -n "$bus_info" ]]; then
+                    echo "│   $(get_label "model"): $nic_vendor ($bus_info)"
+                    model_val="$nic_vendor ($bus_info)"
+                fi
+            fi
+        fi
+        
+        # Try to get vendor info from sysfs
+        if [[ -z "$nic_model" ]]; then
+            local vendor_file="/sys/class/net/$interface/device/vendor"
+            local device_file="/sys/class/net/$interface/device/device"
+            if [[ -r "$vendor_file" && -r "$device_file" ]]; then
+                local vendor_id=$(cat "$vendor_file" 2>/dev/null)
+                local device_id=$(cat "$device_file" 2>/dev/null)
+                if [[ -n "$vendor_id" && -n "$device_id" ]]; then
+                    echo "│   Device ID: $vendor_id:$device_id"
+                    device_id_val="$vendor_id:$device_id"
+                fi
+            fi
+        fi
+        
+        # Interface status (cached)
+        local status="${iface_status[$interface]}"
+        if [[ -z "$status" ]]; then
+            local operstate_file="/sys/class/net/$interface/operstate"
+            if [[ -r "$operstate_file" ]]; then
+                local operstate=$(<"$operstate_file")
+                status="${operstate^^}"
+            fi
+        fi
+        echo "│   $(get_label "status"): ${status:-"Unknown"}"
+        
+        # IP addresses (with privacy masking)
+        local ipv4="${iface_ipv4[$interface]}"
+        local ipv6="${iface_ipv6[$interface]}"
+        local masked_ipv4=""
+        local masked_ipv6=""
+        
+        if [[ -n "$ipv4" ]]; then
+            masked_ipv4=$(mask_ip_address "$ipv4")
+            echo "│   IPv4: $masked_ipv4"
+        fi
+        if [[ -n "$ipv6" ]]; then
+            masked_ipv6=$(mask_ip_address "$ipv6")
+            echo "│   IPv6: $masked_ipv6"
+        fi
+        
+        # MAC address (with privacy masking)
+        local mac="${iface_mac[$interface]}"
+        local masked_mac=""
+        if [[ -z "$mac" ]]; then
+            local mac_file="/sys/class/net/$interface/address"
+            [[ -r "$mac_file" ]] && mac=$(<"$mac_file")
+        fi
+        if [[ -n "$mac" ]]; then
+            masked_mac=$(mask_mac_address "$mac")
+            echo "│   $(get_label "mac_address"): $masked_mac"
+        fi
+        
+        # Speed and duplex information
+        local speed_file="/sys/class/net/$interface/speed"
+        local duplex_file="/sys/class/net/$interface/duplex"
+        local speed_val=""
+        local duplex_val=""
+        
+        if [[ -r "$speed_file" ]]; then
+            local speed=$(cat "$speed_file" 2>/dev/null)
+            if [[ "$speed" != "-1" && -n "$speed" ]]; then
+                echo "│   $(get_label "speed"): ${speed} Mbps"
+                speed_val="$speed"
+            fi
+        fi
+        
+        if [[ -r "$duplex_file" ]]; then
+            local duplex=$(cat "$duplex_file" 2>/dev/null)
+            if [[ -n "$duplex" ]]; then
+                echo "│   $(get_label "duplex"): $duplex"
+                duplex_val="$duplex"
+            fi
+        fi
+        
+        # Link detection
+        local carrier_file="/sys/class/net/$interface/carrier"
+        local link_detected=""
+        if [[ -r "$carrier_file" ]]; then
+            local carrier=$(cat "$carrier_file" 2>/dev/null)
+            if [[ "$carrier" == "1" ]]; then
+                echo "│   $(get_label "link_detected"): Yes"
+                link_detected="Yes"
+            else
+                echo "│   $(get_label "link_detected"): No"
+                link_detected="No"
+            fi
+        fi
+        
+
+        
+        # Network statistics with smart unit selection
+        local rx_bytes=$(cat "/sys/class/net/$interface/statistics/rx_bytes" 2>/dev/null)
+        local tx_bytes=$(cat "/sys/class/net/$interface/statistics/tx_bytes" 2>/dev/null)
+        local rx_display=""
+        local tx_display=""
+        
+        if [[ -n "$rx_bytes" ]]; then
+            local rx_gb=$(echo "scale=2; $rx_bytes / 1024 / 1024 / 1024" | bc -l 2>/dev/null)
+            # Add leading zero if needed and choose appropriate unit
+            if [[ -n "$rx_gb" ]]; then
+                # Add leading zero for decimal numbers starting with dot
+                if [[ "$rx_gb" =~ ^\. ]]; then
+                    rx_gb="0$rx_gb"
+                fi
+                # Convert to TB if >= 1024 GB
+                if [[ $(echo "$rx_gb > 1024" | bc -l 2>/dev/null) -eq 1 ]]; then
+                    local rx_tb=$(echo "scale=2; $rx_gb / 1024" | bc -l 2>/dev/null)
+                    # Add leading zero for TB as well
+                    if [[ "$rx_tb" =~ ^\. ]]; then
+                        rx_tb="0$rx_tb"
+                    fi
+                    echo "│   RX: ${rx_tb} TB"
+                    rx_display="${rx_tb} TB"
+                else
+                    echo "│   RX: ${rx_gb} GB"
+                    rx_display="${rx_gb} GB"
+                fi
+            else
+                echo "│   RX: 0.00 GB"
+                rx_display="0.00 GB"
+            fi
+        fi
+        
+        if [[ -n "$tx_bytes" ]]; then
+            local tx_gb=$(echo "scale=2; $tx_bytes / 1024 / 1024 / 1024" | bc -l 2>/dev/null)
+            # Add leading zero if needed and choose appropriate unit
+            if [[ -n "$tx_gb" ]]; then
+                # Add leading zero for decimal numbers starting with dot
+                if [[ "$tx_gb" =~ ^\. ]]; then
+                    tx_gb="0$tx_gb"
+                fi
+                # Convert to TB if >= 1024 GB
+                if [[ $(echo "$tx_gb > 1024" | bc -l 2>/dev/null) -eq 1 ]]; then
+                    local tx_tb=$(echo "scale=2; $tx_gb / 1024" | bc -l 2>/dev/null)
+                    # Add leading zero for TB as well
+                    if [[ "$tx_tb" =~ ^\. ]]; then
+                        tx_tb="0$tx_tb"
+                    fi
+                    echo "│   TX: ${tx_tb} TB"
+                    tx_display="${tx_tb} TB"
+                else
+                    echo "│   TX: ${tx_gb} GB"
+                    tx_display="${tx_gb} GB"
+                fi
+            else
+                echo "│   TX: 0.00 GB"
+                tx_display="0.00 GB"
+            fi
+        fi
+
+        local net_kv=(
+            "$(json_kv "name" "$interface")"
+            "$(json_kv "status" "${status:-"Unknown"}")"
+        )
+        [[ -n "$model_val" ]] && net_kv+=("$(json_kv "model" "$model_val")")
+        [[ -n "$device_id_val" ]] && net_kv+=("$(json_kv "device_id" "$device_id_val")")
+        [[ -n "$masked_ipv4" ]] && net_kv+=("$(json_kv "ipv4" "$masked_ipv4")")
+        [[ -n "$masked_ipv6" ]] && net_kv+=("$(json_kv "ipv6" "$masked_ipv6")")
+        [[ -n "$masked_mac" ]] && net_kv+=("$(json_kv "mac" "$masked_mac")")
+        [[ -n "$speed_val" ]] && net_kv+=("$(json_kv "speed_mbps" "$speed_val")")
+        [[ -n "$duplex_val" ]] && net_kv+=("$(json_kv "duplex" "$duplex_val")")
+        [[ -n "$link_detected" ]] && net_kv+=("$(json_kv "link_detected" "$link_detected")")
+        [[ -n "$rx_display" ]] && net_kv+=("$(json_kv "rx" "$rx_display")")
+        [[ -n "$tx_display" ]] && net_kv+=("$(json_kv "tx" "$tx_display")")
+        JSON_NETWORK+=("$(json_obj "${net_kv[@]}")")
+    done
+    
+    echo "└$(repeat_char '─' 50)"
+}
+
+# Function to get GPU information
+get_gpu_info() {
+    print_subsection "$(get_label "gpu_info")"
+    
+    local gpu_found=false
+    JSON_GPU=()
+    
+    # NVIDIA GPUs
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        echo "│"
+        print_color "$GREEN" "│ NVIDIA Graphics Cards:"
+        
+        # Get NVIDIA GPU information
+        while IFS=',' read -r name memory driver temp power util; do
+            local name_val=$(echo "$name" | xargs)
+            local memory_val=$(echo "$memory" | xargs)
+            local driver_val=$(echo "$driver" | xargs)
+            local temp_val=$(echo "$temp" | xargs)
+            local power_val=$(echo "$power" | xargs)
+            local util_val=$(echo "$util" | xargs)
+
+            echo "│   ═══ $name_val ═══"
+            echo "│   $(get_label "memory"): ${memory_val} MB"
+            echo "│   $(get_label "driver"): $driver_val"
+            echo "│   $(get_label "temperature"): ${temp_val}°C"
+            echo "│   Power Draw: ${power_val} W"
+            echo "│   GPU Usage: ${util_val}%"
+            echo "│"
+
+            local gpu_kv=(
+                "$(json_kv "source" "nvidia-smi")"
+                "$(json_kv "name" "$name_val")"
+                "$(json_kv "memory_mb" "$memory_val")"
+                "$(json_kv "driver" "$driver_val")"
+                "$(json_kv "temperature_c" "$temp_val")"
+                "$(json_kv "power_w" "$power_val")"
+                "$(json_kv "utilization_percent" "$util_val")"
+            )
+            JSON_GPU+=("$(json_obj "${gpu_kv[@]}")")
+        done < <(nvidia-smi --query-gpu=name,memory.total,driver_version,temperature.gpu,power.draw,utilization.gpu --format=csv,noheader,nounits 2>/dev/null)
+        gpu_found=true
+    fi
+    
+    # AMD GPUs
+    if command -v rocm-smi >/dev/null 2>&1; then
+        echo "│"
+        print_color "$GREEN" "│ AMD Graphics Cards:"
+        while IFS= read -r line; do
+            echo "│   $line"
+            local gpu_kv=(
+                "$(json_kv "source" "rocm-smi")"
+                "$(json_kv "line" "$line")"
+            )
+            JSON_GPU+=("$(json_obj "${gpu_kv[@]}")")
+        done < <(rocm-smi --showproductname --showmeminfo --showtemp 2>/dev/null | grep -E "Card|Memory|Temperature")
+        gpu_found=true
+    fi
+    
+    # Intel GPUs and general GPU detection
+    if command -v lspci >/dev/null 2>&1; then
+        local gpu_devices=$(lspci | grep -E "(VGA|3D|Display)" | grep -v "Audio")
+        if [[ -n "$gpu_devices" ]]; then
+            if [[ "$gpu_found" == false ]]; then
+                echo "│"
+                print_color "$GREEN" "│ Graphics Cards (PCI):"
+            fi
+            while IFS= read -r line; do
+                echo "│   $line"
+                local gpu_kv=(
+                    "$(json_kv "source" "lspci")"
+                    "$(json_kv "line" "$line")"
+                )
+                JSON_GPU+=("$(json_obj "${gpu_kv[@]}")")
+            done <<< "$gpu_devices"
+            gpu_found=true
+        fi
+    fi
+    
+    # Additional GPU information from lshw
+    if command -v lshw >/dev/null 2>&1; then
+        local gpu_lshw=$(lshw -c display -short 2>/dev/null | grep -v "H/W path")
+        if [[ -n "$gpu_lshw" ]]; then
+            echo "│"
+            print_color "$GREEN" "│ Display Hardware Summary:"
+            while IFS= read -r line; do
+                if [[ -n "$line" ]]; then
+                    echo "│   $line"
+                    local gpu_kv=(
+                        "$(json_kv "source" "lshw")"
+                        "$(json_kv "line" "$line")"
+                    )
+                    JSON_GPU+=("$(json_obj "${gpu_kv[@]}")")
+                fi
+            done <<< "$gpu_lshw"
+            gpu_found=true
+        fi
+    fi
+    
+    if [[ "$gpu_found" == false ]]; then
+        print_info "$(get_label "status")" "$(get_label "not_detected")"
+    fi
+    
+    echo "└$(repeat_char '─' 50)"
+}
+
+# Function to get motherboard information
+get_motherboard_info() {
+    print_subsection "$(get_label "motherboard_info")"
+    
+    if command -v dmidecode >/dev/null 2>&1; then
+        local mb_vendor=$(dmidecode -s baseboard-manufacturer 2>/dev/null)
+        local mb_product=$(dmidecode -s baseboard-product-name 2>/dev/null)
+        local mb_version=$(dmidecode -s baseboard-version 2>/dev/null)
+        local bios_vendor=$(dmidecode -s bios-vendor 2>/dev/null)
+        local bios_version=$(dmidecode -s bios-version 2>/dev/null)
+        
+        print_info "$(get_label "vendor")" "${mb_vendor:-$(get_label "no_info")}"
+        print_info "$(get_label "model")" "${mb_product:-$(get_label "no_info")}"
+        print_info "Version" "${mb_version:-$(get_label "no_info")}"
+        print_info "BIOS Vendor" "${bios_vendor:-$(get_label "no_info")}"
+        print_info "BIOS Version" "${bios_version:-$(get_label "no_info")}"
+
+        JSON_MOTHERBOARD_KV=(
+            "$(json_kv "vendor" "$mb_vendor")"
+            "$(json_kv "model" "$mb_product")"
+            "$(json_kv "version" "$mb_version")"
+            "$(json_kv "bios_vendor" "$bios_vendor")"
+            "$(json_kv "bios_version" "$bios_version")"
+        )
+    else
+        print_info "$(get_label "status")" "$(get_label "no_info") (dmidecode required)"
+        JSON_MOTHERBOARD_KV=()
+    fi
+    
+    echo "└$(repeat_char '─' 50)"
+}
+
+print_report_overview() {
+    local section_title="Report Overview"
+    local version_name="Version"
+    local mode_name="Mode"
+    local io_benchmark_name="I/O Benchmark"
+    local io_method_name="I/O Method"
+    local privacy_name="Privacy"
+    local source_name="Source"
+    local mode_label="Text"
+    local io_status="Disabled (use --io-test)"
+    local io_method="fio read/write benchmark; dd read/write fallback"
+    local privacy_status="IP/MAC masked"
+    local source_value="Yuri-NagaSaki/SICK - https://github.com/Yuri-NagaSaki/SICK"
+
+    if [[ "$LANG_MODE" == "cn" ]]; then
+        section_title="报告概览"
+        version_name="版本"
+        mode_name="模式"
+        io_benchmark_name="I/O 基准"
+        io_method_name="I/O 方法"
+        privacy_name="隐私"
+        source_name="来源"
+        mode_label="文本"
+        io_status="未启用（使用 --io-test）"
+        io_method="fio 读写基准；dd 读写兜底"
+        privacy_status="IP/MAC 已脱敏"
+    fi
+
+    if [[ "$RUN_IO_TEST" == true ]]; then
+        if [[ "$LANG_MODE" == "cn" ]]; then
+            io_status="已启用（${IO_TEST_SIZE_MB} MiB/块大小）"
+        else
+            io_status="Enabled (${IO_TEST_SIZE_MB} MiB/block size)"
+        fi
+    fi
+
+    print_subsection "$section_title"
+    print_info "$version_name" "$VERSION"
+    print_info "$mode_name" "$mode_label"
+    print_info "$io_benchmark_name" "$io_status"
+    print_info "$io_method_name" "$io_method"
+    print_info "$privacy_name" "$privacy_status"
+    print_info "$source_name" "$source_value"
+    echo "└$(repeat_char '─' 50)"
+}
+
+# Function to show usage
+show_usage() {
+    cat << EOF
+Usage: $0 [OPTIONS]
+
+Hardware Information Collection Script v$VERSION
+
+OPTIONS:
+    -cn, --chinese     Display output in Chinese
+    -us, --english     Display output in English (default)
+    -j, --json         Output JSON to stdout only
+    --io-test          Run read/write I/O tests on writable local mounts
+    --io-test-size MB  Set read/write test size in MiB (default: $IO_TEST_SIZE_MB)
+    -h, --help         Show this help message
+    -v, --version      Show version information
+
+FEATURES:
+    - Supports bilingual output (English/Chinese)
+    - Comprehensive hardware detection
+    - Mounted local disk writability detection
+    - Optional fio read/write benchmarks via --io-test
+    - JSON output to stdout (no files saved)
+
+Supported Distributions:
+    - Debian/Ubuntu/Linux Mint
+    - CentOS/RHEL/AlmaLinux/Rocky Linux/CloudLinux
+    - Fedora
+    - Arch Linux/Manjaro
+    - openSUSE/SLES
+    - Alpine Linux
+
+Examples:
+    $0                 # Show hardware info in English
+    $0 -cn             # Show hardware info in Chinese
+    $0 --chinese       # Show hardware info in Chinese
+    $0 --json          # Output JSON to stdout
+    $0 --io-test       # Show terminal read/write benchmark tables
+    $0 --json --io-test # Include local mount read/write benchmark results
+
+Note: Run with sudo for complete hardware information access.
+
+EOF
+}
+
+# Function to show version
+show_version() {
+    echo "$SCRIPT_NAME v$VERSION"
+}
+
+# Function to build JSON report string
+build_json_report() {
+    local meta_kv=(
+        "$(json_kv "version" "$VERSION")"
+        "$(json_kv "generated_at" "$(date)")"
+        "$(json_kv "hostname" "$(hostname)")"
+        "$(json_kv "language" "$LANG_MODE")"
+    )
+
+    local memory_kv=("${JSON_RAM_KV[@]}")
+    memory_kv+=("$(json_kv_raw "modules" "$(json_array "${JSON_RAM_MODULES[@]}")")")
+
+    local raid_kv=(
+        "$(json_kv_raw "software" "$(json_array_values "${JSON_RAID_SW[@]}")")"
+        "$(json_kv_raw "hardware" "$(json_array_values "${JSON_RAID_HW[@]}")")"
+        "$(json_kv_raw "controllers" "$(json_array "${JSON_RAID_CONTROLLERS[@]}")")"
+    )
+
+    local io_kv=("${JSON_IO_KV[@]}")
+    io_kv+=("$(json_kv_raw "mounts" "$(json_array "${JSON_IO_MOUNTS[@]}")")")
+
+    local root_kv=(
+        "$(json_kv_raw "meta" "$(json_obj "${meta_kv[@]}")")"
+        "$(json_kv_raw "system" "$(json_obj "${JSON_SYSTEM_KV[@]}")")"
+        "$(json_kv_raw "cpu" "$(json_obj "${JSON_CPU_KV[@]}")")"
+        "$(json_kv_raw "memory" "$(json_obj "${memory_kv[@]}")")"
+        "$(json_kv_raw "disks" "$(json_array "${JSON_DISKS[@]}")")"
+        "$(json_kv_raw "io" "$(json_obj "${io_kv[@]}")")"
+        "$(json_kv_raw "raid" "$(json_obj "${raid_kv[@]}")")"
+        "$(json_kv_raw "network" "$(json_array "${JSON_NETWORK[@]}")")"
+        "$(json_kv_raw "gpu" "$(json_array "${JSON_GPU[@]}")")"
+        "$(json_kv_raw "motherboard" "$(json_obj "${JSON_MOTHERBOARD_KV[@]}")")"
+    )
+
+    printf '%s' "$(json_obj "${root_kv[@]}")"
+}
+
+# Main function
+main() {
+    # Parse command line arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -cn|--chinese)
+                LANG_MODE="cn"
+                shift
+                ;;
+            -us|--english)
+                LANG_MODE="en"
+                shift
+                ;;
+            -j|--json)
+                OUTPUT_MODE="json"
+                shift
+                ;;
+            --io-test)
+                RUN_IO_TEST=true
+                shift
+                ;;
+            --io-test-size)
+                if [[ -z "${2:-}" || ! "$2" =~ ^[0-9]+$ || "$2" -lt 1 ]]; then
+                    echo "Invalid --io-test-size value: ${2:-}"
+                    exit 1
+                fi
+                IO_TEST_SIZE_MB="$2"
+                shift 2
+                ;;
+            -h|--help)
+                show_usage
+                exit 0
+                ;;
+            -v|--version)
+                show_version
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1"
+                show_usage
+                exit 1
+                ;;
+        esac
+    done
+
+    generate_report_text() {
+        # Print title
+        print_header "$(get_label "title")"
+        print_report_overview
+
+        # Collect all hardware information
+        get_system_info
+        get_cpu_info
+        get_ram_info
+        get_disk_info
+        get_io_info
+        get_raid_info
+        get_network_info
+        get_gpu_info
+        get_motherboard_info
+
+        # Footer
+        echo
+        print_color "$GREEN" "$(get_label "completed")"
+        print_color "$CYAN" "Generated on: $(date)"
+        echo
+    }
+
+    generate_report_json() {
+        json_reset
+        {
+            get_system_info
+            get_cpu_info
+            get_ram_info
+            get_disk_info
+            get_io_info
+            get_raid_info
+            get_network_info
+            get_gpu_info
+            get_motherboard_info
+        } >/dev/null 2>&1
+        build_json_report
+        echo
+    }
+
+    if [[ "$OUTPUT_MODE" == "json" ]]; then
+        generate_report_json
+        return
+    fi
+
+    # Check if running as root for some commands (text output only)
+    if [[ $EUID -ne 0 ]]; then
+        print_color "$YELLOW" "Note: Some hardware information requires root privileges."
+        print_color "$YELLOW" "Run with sudo for complete information."
+        echo
+    fi
+
+    # Install required packages (text output only)
+    print_color "$BLUE" "$(get_label "generating")"
+    echo
+
+    if ! install_packages; then
+        # Installation failed or incomplete
+        if [[ "$LANG_MODE" == "cn" ]]; then
+            echo "⚠️  某些工具缺失，硬件信息可能不完整。"
+            echo "您可以选择："
+            echo "1. 继续生成报告（某些信息可能缺失）"
+            echo "2. 手动安装缺失的软件包后重新运行脚本"
+        else
+            echo "⚠️  Some tools are missing, hardware information may be incomplete."
+            echo "You can choose to:"
+            echo "1. Continue generating report (some information may be missing)"
+            echo "2. Manually install missing packages and re-run the script"
+        fi
+        echo
+
+        read -p "Continue anyway? [y/N]: " -r choice
+        case "$choice" in
+            [Yy]*)
+                if [[ "$LANG_MODE" == "cn" ]]; then
+                    echo "继续生成报告..."
+                else
+                    echo "Continuing with report generation..."
+                fi
+                ;;
+            *)
+                if [[ "$LANG_MODE" == "cn" ]]; then
+                    echo "脚本已退出。请安装所需软件包后重新运行。"
+                else
+                    echo "Script exited. Please install required packages and re-run."
+                fi
+                exit 1
+                ;;
+        esac
+        echo
+    fi
+
+    generate_report_text
+}
+
+# Run main function
+main "$@"
+
+# __HARDWARE_INFO_SH_PAYLOAD_END__
+
