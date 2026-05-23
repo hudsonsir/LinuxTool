@@ -117,7 +117,8 @@ system_menu() {
     render_menu_item 15 "$selected" "15. 查看当前服务器时区时间"
     render_menu_item 16 "$selected" "16. 一键设置SWAP大小"
     render_menu_item 17 "$selected" "17. 一键开启/关闭IPv6"
-    render_menu_item 18 "$selected" "q. 返回上级菜单"
+    render_menu_item 18 "$selected" "18. 一键硬盘检测"
+    render_menu_item 19 "$selected" "q. 返回上级菜单"
     echo "===================="
     echo "使用 ↑/↓ 选择，回车确认；也可以直接输入数字或 q。"
 }
@@ -193,7 +194,7 @@ main_selected_to_choice() {
 }
 
 system_selected_to_choice() {
-    if [ "$1" -eq 18 ]; then
+    if [ "$1" -eq 19 ]; then
         echo "q"
     else
         echo "$1"
@@ -844,6 +845,208 @@ toggle_ipv6() {
     fi
 }
 
+format_bytes() {
+    local bytes="$1"
+
+    if [[ -z "$bytes" || ! "$bytes" =~ ^[0-9]+$ ]]; then
+        echo "未知"
+        return
+    fi
+
+    awk -v bytes="$bytes" 'BEGIN {
+        split("B KB MB GB TB PB", units, " ")
+        value = bytes
+        unit = 1
+        while (value >= 1024 && unit < 6) {
+            value = value / 1024
+            unit++
+        }
+        if (unit == 1) {
+            printf "%d %s", value, units[unit]
+        } else {
+            printf "%.2f %s", value, units[unit]
+        }
+    }'
+}
+
+detect_disk_bad_blocks() {
+    local smart_text="$1"
+    local reallocated pending offline_uncorrectable reported_uncorrect grown_defects non_medium total_bad
+
+    reallocated=$(echo "$smart_text" | awk 'tolower($0) ~ /reallocated_sector_ct/ {print $NF; exit}')
+    pending=$(echo "$smart_text" | awk 'tolower($0) ~ /current_pending_sector/ {print $NF; exit}')
+    offline_uncorrectable=$(echo "$smart_text" | awk 'tolower($0) ~ /offline_uncorrectable/ {print $NF; exit}')
+    reported_uncorrect=$(echo "$smart_text" | awk 'tolower($0) ~ /reported_uncorrect/ {print $NF; exit}')
+    grown_defects=$(echo "$smart_text" | awk 'tolower($0) ~ /elements in grown defect list/ {for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) value=$i; print value; exit}')
+    non_medium=$(echo "$smart_text" | awk 'tolower($0) ~ /non-medium error count/ {for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) value=$i; print value; exit}')
+
+    total_bad=0
+    [[ "$reallocated" =~ ^[0-9]+$ ]] && total_bad=$((total_bad + reallocated))
+    [[ "$pending" =~ ^[0-9]+$ ]] && total_bad=$((total_bad + pending))
+    [[ "$offline_uncorrectable" =~ ^[0-9]+$ ]] && total_bad=$((total_bad + offline_uncorrectable))
+
+    [[ "$reallocated" =~ ^[0-9]+$ ]] && echo "│   重映射扇区: $reallocated"
+    [[ "$pending" =~ ^[0-9]+$ ]] && echo "│   待处理扇区: $pending"
+    [[ "$offline_uncorrectable" =~ ^[0-9]+$ ]] && echo "│   离线不可校正: $offline_uncorrectable"
+    [[ "$reported_uncorrect" =~ ^[0-9]+$ ]] && echo "│   报告的不可校正: $reported_uncorrect"
+    [[ "$grown_defects" =~ ^[0-9]+$ ]] && echo "│   增长缺陷列表: $grown_defects"
+    [[ "$non_medium" =~ ^[0-9]+$ && "$non_medium" -gt 0 ]] && echo "│   非介质错误: $non_medium"
+
+    if [ "$total_bad" -gt 0 ]; then
+        echo -e "│   ${RED}坏块/风险扇区合计: $total_bad${RESET}"
+    elif [[ "$reallocated$pending$offline_uncorrectable" =~ [0-9] ]]; then
+        echo -e "│   ${GREEN}坏块/风险扇区合计: 0${RESET}"
+    fi
+}
+
+show_smart_for_disk() {
+    local disk="$1"
+    local smart_text health temperature power_hours percentage_used available_spare critical_warning
+
+    if ! command -v smartctl >/dev/null 2>&1; then
+        echo "│   SMART状态: smartctl未安装"
+        return
+    fi
+
+    smart_text=$(sudo smartctl -a "/dev/$disk" 2>/dev/null)
+    if [ -z "$smart_text" ]; then
+        echo "│   SMART状态: 无法读取"
+        return
+    fi
+
+    health=$(echo "$smart_text" | awk -F': ' '/SMART overall-health|SMART Health Status|SMART overall-health self-assessment/ {print $2; exit}')
+    [ -n "$health" ] && echo "│   SMART健康: $health"
+
+    temperature=$(echo "$smart_text" | awk '
+        /Temperature:/ {for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) {print $i; exit}}
+        /Temperature_Celsius/ {print $10; exit}
+        /Current Drive Temperature/ {for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) {print $i; exit}}
+    ')
+    [ -n "$temperature" ] && echo "│   温度: ${temperature}°C"
+
+    power_hours=$(echo "$smart_text" | awk '
+        /Power_On_Hours/ {print $10; exit}
+        /Accumulated power on time/ {for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) value=$i; print value; exit}
+        /number of hours powered up/ {for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) value=$i; print value; exit}
+    ')
+    [ -n "$power_hours" ] && echo "│   通电时间: ${power_hours} 小时"
+
+    if [[ "$disk" =~ ^nvme ]]; then
+        percentage_used=$(echo "$smart_text" | awk -F: '/Percentage Used/ {gsub(/[^0-9]/, "", $2); print $2; exit}')
+        available_spare=$(echo "$smart_text" | awk -F: '/Available Spare/ {gsub(/[^0-9]/, "", $2); print $2; exit}')
+        critical_warning=$(echo "$smart_text" | awk -F: '/Critical Warning/ {gsub(/^[ \t]+/, "", $2); print $2; exit}')
+        [ -n "$percentage_used" ] && echo "│   已使用耐久度: ${percentage_used}%"
+        [ -n "$available_spare" ] && echo "│   可用备用块: ${available_spare}%"
+        [ -n "$critical_warning" ] && echo "│   关键警告: $critical_warning"
+    fi
+
+    detect_disk_bad_blocks "$smart_text"
+}
+
+install_disk_check_tools() {
+    local missing=()
+
+    command -v smartctl >/dev/null 2>&1 || missing+=("smartmontools")
+    command -v lsblk >/dev/null 2>&1 || missing+=("util-linux")
+
+    if [ "${#missing[@]}" -eq 0 ]; then
+        return 0
+    fi
+
+    echo "检测到缺少工具: ${missing[*]}"
+    read -p "是否尝试自动安装？(y/N): " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        echo "已跳过安装，硬盘信息可能不完整。"
+        return 0
+    fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update
+        sudo apt-get install -y "${missing[@]}"
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y "${missing[@]}"
+    elif command -v yum >/dev/null 2>&1; then
+        sudo yum install -y "${missing[@]}"
+    elif command -v pacman >/dev/null 2>&1; then
+        sudo pacman -S --noconfirm "${missing[@]}"
+    elif command -v zypper >/dev/null 2>&1; then
+        sudo zypper install -y "${missing[@]}"
+    elif command -v apk >/dev/null 2>&1; then
+        sudo apk add "${missing[@]}"
+    else
+        echo "未识别包管理器，请手动安装: ${missing[*]}"
+        return 1
+    fi
+}
+
+disk_health_check() {
+    local disks=()
+    local disk size model vendor serial rota tran mount_info
+
+    clear
+    echo "=== 一键硬盘检测 ==="
+    echo "脚本来源: Yuri-NagaSaki/SICK"
+    echo "项目地址: https://github.com/Yuri-NagaSaki/SICK"
+    echo
+
+    install_disk_check_tools
+    echo
+
+    echo "=== 文件系统使用情况 ==="
+    df -h | grep -E '^/dev/' || echo "未检测到 /dev 文件系统挂载。"
+    echo
+
+    if ! command -v lsblk >/dev/null 2>&1; then
+        echo "lsblk 不可用，无法继续检测硬盘列表。"
+        return 1
+    fi
+
+    while IFS= read -r disk; do
+        [ -n "$disk" ] && disks+=("$disk")
+    done < <(lsblk -d -n -o NAME 2>/dev/null | grep -E '^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)$')
+
+    if [ "${#disks[@]}" -eq 0 ]; then
+        echo "未检测到可识别的硬盘设备。"
+        return 1
+    fi
+
+    echo "=== 硬盘详情与健康状态 ==="
+    for disk in "${disks[@]}"; do
+        size=$(lsblk -d -n -o SIZE "/dev/$disk" 2>/dev/null | sed 's/^ *//')
+        model=$(lsblk -d -n -o MODEL "/dev/$disk" 2>/dev/null | sed 's/^ *//')
+        vendor=$(lsblk -d -n -o VENDOR "/dev/$disk" 2>/dev/null | sed 's/^ *//')
+        serial=$(lsblk -d -n -o SERIAL "/dev/$disk" 2>/dev/null | sed 's/^ *//')
+        rota=$(lsblk -d -n -o ROTA "/dev/$disk" 2>/dev/null | sed 's/^ *//')
+        tran=$(lsblk -d -n -o TRAN "/dev/$disk" 2>/dev/null | sed 's/^ *//')
+
+        echo "┌──────────────────────────────────────────────────"
+        echo "│ 设备: /dev/$disk"
+        echo "│ 容量: ${size:-未知}"
+        echo "│ 型号: ${vendor:-}${vendor:+ }${model:-未知}"
+        [ -n "$serial" ] && echo "│ 序列号: $serial"
+        [ -n "$tran" ] && echo "│ 接口: $tran"
+        if [ "$rota" = "1" ]; then
+            echo "│ 类型: HDD"
+        elif [ "$rota" = "0" ]; then
+            echo "│ 类型: SSD/NVMe"
+        fi
+
+        mount_info=$(lsblk -n -o NAME,MOUNTPOINT "/dev/$disk" 2>/dev/null | awk '$2 != "" {print "/dev/" $1 " -> " $2}')
+        if [ -n "$mount_info" ]; then
+            echo "│ 挂载:"
+            echo "$mount_info" | while IFS= read -r line; do
+                echo "│   $line"
+            done
+        fi
+
+        show_smart_for_disk "$disk"
+        echo "└──────────────────────────────────────────────────"
+        echo
+    done
+
+    echo -e "${GREEN}硬盘检测完成。${RESET}"
+}
+
 ensure_sudo
 
 # 主循环
@@ -870,7 +1073,7 @@ while true; do
             system_selected=1
             while true; do
                 system_menu "$system_selected"
-                menu_result=$(read_menu_choice "$system_selected" 18)
+                menu_result=$(read_menu_choice "$system_selected" 19)
                 case "$menu_result" in
                     MOVE:*)
                         system_selected="${menu_result#MOVE:}"
@@ -936,6 +1139,9 @@ while true; do
                         ;;
                     17)
                         toggle_ipv6
+                        ;;
+                    18)
+                        disk_health_check
                         ;;
                     q|Q)
                         break
