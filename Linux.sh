@@ -5,6 +5,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 RESET='\033[0m'
+SCRIPT_VERSION="1.0.0"
 
 # 检测并自动安装 sudo（部分精简系统镜像默认未安装）
 ensure_sudo() {
@@ -76,7 +77,7 @@ show_menu() {
 
     echo -e "
 ===================================================
-✪  工具名称：${RED}Linux工具${RESET}  当前版本：1.0.0            
+✪  工具名称：${RED}Linux工具${RESET}  当前版本：${SCRIPT_VERSION}            
 ✪  服务器IP：$server_ip
 ✪  运行时间：$uptime_cn
 --------------------[综合菜单]---------------------
@@ -205,13 +206,22 @@ uninstall_script() {
 
     script_path="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 
-    echo "即将卸载本地脚本: $script_path"
+    clear
+    echo "=== 卸载本地脚本 ==="
+    echo "当前版本: $SCRIPT_VERSION"
+    echo "脚本路径: $script_path"
+    echo
     read -p "确认删除该脚本及其备份文件吗？(y/N): " confirm
     case "$confirm" in
         y|Y|yes|YES)
+            echo
+            echo "正在删除备份文件: ${script_path}.bak"
             rm -f "${script_path}.bak" 2>/dev/null
+            echo "正在删除脚本文件: $script_path"
             if rm -f "$script_path"; then
-                echo "脚本已成功卸载，再见！"
+                echo
+                echo -e "${GREEN}脚本已成功卸载。${RESET}"
+                read -p "按回车键退出..."
                 exit 0
             else
                 echo "删除失败，请使用 sudo 重新运行后再试。"
@@ -227,20 +237,25 @@ uninstall_script() {
 # 更新本地脚本
 update_script() {
     local remote_url="https://raw.githubusercontent.com/hudsonsir/LinuxTool/main/Linux.sh"
-    local script_path tmp_file
+    local script_path tmp_file remote_version reload_confirm
 
     script_path="$(readlink -f "$0" 2>/dev/null || echo "$0")"
     tmp_file="$(mktemp)"
 
-    echo "正在从 GitHub 拉取最新版本的脚本..."
+    clear
+    echo "=== 更新本地脚本 ==="
+    echo "当前版本: $SCRIPT_VERSION"
     echo "源地址: $remote_url"
     echo "本地路径: $script_path"
+    echo
+    echo "步骤 1/4: 检查 curl..."
 
     if ! command -v curl &> /dev/null; then
         echo "未检测到 curl，请先安装 curl 后再试。"
         return 1
     fi
 
+    echo "步骤 2/4: 下载远程脚本..."
     if ! curl -fsSL "$remote_url" -o "$tmp_file"; then
         echo "下载失败，请检查网络或稍后重试。"
         rm -f "$tmp_file"
@@ -253,12 +268,25 @@ update_script() {
         return 1
     fi
 
+    remote_version=$(grep -m1 '^SCRIPT_VERSION=' "$tmp_file" | sed 's/^SCRIPT_VERSION=//; s/"//g; s/'\''//g')
+    [ -z "$remote_version" ] && remote_version="未知"
+    echo "远程版本: $remote_version"
+
+    echo "步骤 3/4: 校验脚本语法..."
     if ! bash -n "$tmp_file" 2>/dev/null; then
         echo "新脚本语法校验失败，已取消更新。"
         rm -f "$tmp_file"
         return 1
     fi
 
+    if cmp -s "$script_path" "$tmp_file"; then
+        echo
+        echo -e "${YELLOW}本地脚本已经是最新内容，无需更新。${RESET}"
+        rm -f "$tmp_file"
+        return 0
+    fi
+
+    echo "步骤 4/4: 备份并写入新脚本..."
     cp "$script_path" "${script_path}.bak" 2>/dev/null && echo "已备份当前脚本到 ${script_path}.bak"
     if ! cp "$tmp_file" "$script_path"; then
         echo "写入失败，请使用 sudo 重新运行后再试。"
@@ -269,8 +297,17 @@ update_script() {
     chmod +x "$script_path"
     rm -f "$tmp_file"
 
-    echo "脚本更新完成，正在重新加载..."
-    exec bash "$script_path"
+    echo
+    echo -e "${GREEN}脚本更新完成。${RESET}"
+    echo "原版本: $SCRIPT_VERSION"
+    echo "新版本: $remote_version"
+    read -p "是否立即重新加载新脚本？(y/N): " reload_confirm
+    if [[ "$reload_confirm" =~ ^[Yy]$ ]]; then
+        echo "正在重新加载..."
+        exec bash "$script_path"
+    fi
+
+    echo "已暂不重新加载，返回菜单。"
 }
 
 # 一键修改密码
