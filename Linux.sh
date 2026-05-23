@@ -70,7 +70,8 @@ get_greeting() {
 
 show_menu() {
     clear
-    local greeting
+    local greeting selected
+    selected="${1:-1}"
     greeting=$(get_greeting)
 
     echo -e "
@@ -79,39 +80,123 @@ show_menu() {
 ✪  服务器IP：$server_ip
 ✪  运行时间：$uptime_cn
 --------------------[综合菜单]---------------------
+"
+    render_menu_item 1 "$selected" "1. 系统操作菜单(修改密码、SSH端口、更新系统等)"
+    render_menu_item 2 "$selected" "q. 退出脚本"
+    render_menu_item 3 "$selected" "u. 卸载脚本"
 
-   1. 系统操作菜单(修改密码、SSH端口、更新系统等)
-   q. 退出脚本
-   u. 卸载脚本
-
+    echo -e "
 ===================================================
 $greeting
+使用 ↑/↓ 选择，回车确认；也可以直接输入数字或字母。
 	"
 }
 
 # 系统操作菜单
 system_menu() {
     clear
+    local selected
+    selected="${1:-1}"
+
     echo "=== 系统操作菜单 ==="
-    echo "1. 更新本地脚本"
-    echo "2. 一键修改密码"
-    echo "3. 一键同步上海时间"
-    echo "4. 一键修改SSH端口"
-    echo "5. 一键修改DNS"
-    echo "6. 一键开启/关闭SSH登录"
-    echo "7. 一键更新CentOS最新版系统"
-    echo "8. 一键更新Ubuntu最新版系统"
-    echo "9. 一键更新Debian最新版系统"
-    echo "10. 一键更换系统软件源(LinuxMirrors)"
-    echo "11. 一键创建子用户或管理员"
-    echo "12. 一键查看当前与服务器连接的IP"
-    echo "13. 一键修改服务器主机名"
-    echo "14. 一键查看SSH登录成功的IP地址"
-    echo "15. 查看当前服务器时区时间"
-    echo "16. 一键设置SWAP大小"
-    echo "17. 一键开启/关闭IPv6"
-    echo "q. 返回上级菜单"
+    render_menu_item 1 "$selected" "1. 更新本地脚本"
+    render_menu_item 2 "$selected" "2. 一键修改密码"
+    render_menu_item 3 "$selected" "3. 一键同步上海时间"
+    render_menu_item 4 "$selected" "4. 一键修改SSH端口"
+    render_menu_item 5 "$selected" "5. 一键修改DNS"
+    render_menu_item 6 "$selected" "6. 一键开启/关闭SSH登录"
+    render_menu_item 7 "$selected" "7. 一键更新CentOS最新版系统"
+    render_menu_item 8 "$selected" "8. 一键更新Ubuntu最新版系统"
+    render_menu_item 9 "$selected" "9. 一键更新Debian最新版系统"
+    render_menu_item 10 "$selected" "10. 一键更换系统软件源(LinuxMirrors)"
+    render_menu_item 11 "$selected" "11. 一键创建子用户或管理员"
+    render_menu_item 12 "$selected" "12. 一键查看当前与服务器连接的IP"
+    render_menu_item 13 "$selected" "13. 一键修改服务器主机名"
+    render_menu_item 14 "$selected" "14. 一键查看SSH登录成功的IP地址"
+    render_menu_item 15 "$selected" "15. 查看当前服务器时区时间"
+    render_menu_item 16 "$selected" "16. 一键设置SWAP大小"
+    render_menu_item 17 "$selected" "17. 一键开启/关闭IPv6"
+    render_menu_item 18 "$selected" "q. 返回上级菜单"
     echo "===================="
+    echo "使用 ↑/↓ 选择，回车确认；也可以直接输入数字或 q。"
+}
+
+render_menu_item() {
+    local index selected text
+    index="$1"
+    selected="$2"
+    text="$3"
+
+    if [ "$index" -eq "$selected" ]; then
+        echo -e "   ${GREEN}light+ $text${RESET}"
+    else
+        echo "   light- $text"
+    fi
+}
+
+read_menu_choice() {
+    local selected max key extra digits next
+    selected="$1"
+    max="$2"
+
+    while true; do
+        IFS= read -rsn1 key
+        case "$key" in
+            "")
+                echo "SELECT:$selected"
+                return 0
+                ;;
+            $'\x1b')
+                IFS= read -rsn2 -t 0.1 extra
+                case "$extra" in
+                    "[A")
+                        selected=$((selected - 1))
+                        [ "$selected" -lt 1 ] && selected="$max"
+                        echo "MOVE:$selected"
+                        return 0
+                        ;;
+                    "[B")
+                        selected=$((selected + 1))
+                        [ "$selected" -gt "$max" ] && selected=1
+                        echo "MOVE:$selected"
+                        return 0
+                        ;;
+                esac
+                ;;
+            [0-9])
+                digits="$key"
+                while IFS= read -rsn1 -t 0.35 next; do
+                    if [[ "$next" =~ ^[0-9]$ ]]; then
+                        digits="${digits}${next}"
+                    else
+                        break
+                    fi
+                done
+                echo "DIRECT:$digits"
+                return 0
+                ;;
+            [qQuU])
+                echo "DIRECT:$key"
+                return 0
+                ;;
+        esac
+    done
+}
+
+main_selected_to_choice() {
+    case "$1" in
+        1) echo "1" ;;
+        2) echo "q" ;;
+        3) echo "u" ;;
+    esac
+}
+
+system_selected_to_choice() {
+    if [ "$1" -eq 18 ]; then
+        echo "q"
+    else
+        echo "$1"
+    fi
 }
 
 # 卸载本地脚本
@@ -725,14 +810,44 @@ toggle_ipv6() {
 ensure_sudo
 
 # 主循环
+main_selected=1
 while true; do
-    show_menu
-    read -p "请输入选项: " choice
+    show_menu "$main_selected"
+    menu_result=$(read_menu_choice "$main_selected" 3)
+    case "$menu_result" in
+        MOVE:*)
+            main_selected="${menu_result#MOVE:}"
+            continue
+            ;;
+        SELECT:*)
+            main_selected="${menu_result#SELECT:}"
+            choice=$(main_selected_to_choice "$main_selected")
+            ;;
+        DIRECT:*)
+            choice="${menu_result#DIRECT:}"
+            ;;
+    esac
+
     case "$choice" in
         1)
+            system_selected=1
             while true; do
-                system_menu
-                read -p "请输入选项: " system_choice
+                system_menu "$system_selected"
+                menu_result=$(read_menu_choice "$system_selected" 18)
+                case "$menu_result" in
+                    MOVE:*)
+                        system_selected="${menu_result#MOVE:}"
+                        continue
+                        ;;
+                    SELECT:*)
+                        system_selected="${menu_result#SELECT:}"
+                        system_choice=$(system_selected_to_choice "$system_selected")
+                        ;;
+                    DIRECT:*)
+                        system_choice="${menu_result#DIRECT:}"
+                        ;;
+                esac
+
                 case "$system_choice" in
                     1)
                         update_script
