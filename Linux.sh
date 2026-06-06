@@ -5,7 +5,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 RESET='\033[0m'
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.0.0"
 
 # 检测并自动安装 sudo（部分精简系统镜像默认未安装）
 ensure_sudo() {
@@ -102,7 +102,7 @@ system_menu() {
     echo "=== 系统操作菜单 ==="
     render_menu_item 1 "$selected" "1. 更新本地脚本"
     render_menu_item 2 "$selected" "2. 一键修改密码"
-    render_menu_item 3 "$selected" "3. 一键同步上海时间"
+    render_menu_item 3 "$selected" "3. 时间管理(查看时间、同步上海时间)"
     render_menu_item 4 "$selected" "4. 一键修改SSH端口"
     render_menu_item 5 "$selected" "5. 一键修改DNS"
     render_menu_item 6 "$selected" "6. 一键开启/关闭SSH登录"
@@ -114,11 +114,24 @@ system_menu() {
     render_menu_item 12 "$selected" "12. 一键查看当前与服务器连接的IP"
     render_menu_item 13 "$selected" "13. 一键修改服务器主机名"
     render_menu_item 14 "$selected" "14. 一键查看SSH登录成功的IP地址"
-    render_menu_item 15 "$selected" "15. 查看当前服务器时区时间"
-    render_menu_item 16 "$selected" "16. 一键设置SWAP大小"
-    render_menu_item 17 "$selected" "17. 一键开启/关闭IPv6"
-    render_menu_item 18 "$selected" "18. 一键硬件检测"
-    render_menu_item 19 "$selected" "q. 返回上级菜单"
+    render_menu_item 15 "$selected" "15. 一键设置SWAP大小"
+    render_menu_item 16 "$selected" "16. 一键开启/关闭IPv6"
+    render_menu_item 17 "$selected" "17. 一键硬件检测"
+    render_menu_item 18 "$selected" "q. 返回上级菜单"
+    echo "===================="
+    echo "使用 ↑/↓ 选择，回车确认；也可以直接输入数字或 q。"
+}
+
+# 时间管理菜单
+time_menu() {
+    clear
+    local selected
+    selected="${1:-1}"
+
+    echo "=== 时间管理菜单 ==="
+    render_menu_item 1 "$selected" "1. 查看当前服务器时区时间"
+    render_menu_item 2 "$selected" "2. 一键同步上海时间"
+    render_menu_item 3 "$selected" "q. 返回系统操作菜单"
     echo "===================="
     echo "使用 ↑/↓ 选择，回车确认；也可以直接输入数字或 q。"
 }
@@ -194,7 +207,15 @@ main_selected_to_choice() {
 }
 
 system_selected_to_choice() {
-    if [ "$1" -eq 19 ]; then
+    if [ "$1" -eq 18 ]; then
+        echo "q"
+    else
+        echo "$1"
+    fi
+}
+
+time_selected_to_choice() {
+    if [ "$1" -eq 3 ]; then
         echo "q"
     else
         echo "$1"
@@ -921,7 +942,7 @@ while true; do
             system_selected=1
             while true; do
                 system_menu "$system_selected"
-                menu_result=$(read_menu_choice "$system_selected" 19)
+                menu_result=$(read_menu_choice "$system_selected" 18)
                 case "$menu_result" in
                     MOVE:*)
                         system_selected="${menu_result#MOVE:}"
@@ -944,7 +965,40 @@ while true; do
                         change_password
                         ;;
                     3)
-                        sync_shanghai_time
+                        time_selected=1
+                        while true; do
+                            time_menu "$time_selected"
+                            menu_result=$(read_menu_choice "$time_selected" 3)
+                            case "$menu_result" in
+                                MOVE:*)
+                                    time_selected="${menu_result#MOVE:}"
+                                    continue
+                                    ;;
+                                SELECT:*)
+                                    time_selected="${menu_result#SELECT:}"
+                                    time_choice=$(time_selected_to_choice "$time_selected")
+                                    ;;
+                                DIRECT:*)
+                                    time_choice="${menu_result#DIRECT:}"
+                                    ;;
+                            esac
+
+                            case "$time_choice" in
+                                1)
+                                    show_timezone
+                                    ;;
+                                2)
+                                    sync_shanghai_time
+                                    ;;
+                                q|Q)
+                                    break
+                                    ;;
+                                *)
+                                    echo "无效的选项，请重新输入"
+                                    ;;
+                            esac
+                            read -p "按回车键继续..."
+                        done
                         ;;
                     4)
                         change_ssh_port
@@ -980,15 +1034,12 @@ while true; do
                         show_login_ips
                         ;;
                     15)
-                        show_timezone
-                        ;;
-                    16)
                         set_swap_menu
                         ;;
-                    17)
+                    16)
                         toggle_ipv6
                         ;;
-                    18)
+                    17)
                         hardware_info_check
                         ;;
                     q|Q)
