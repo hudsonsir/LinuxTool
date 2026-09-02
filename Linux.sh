@@ -274,6 +274,7 @@ update_script() {
 
     if ! command -v curl &> /dev/null; then
         echo "未检测到 curl，请先安装 curl 后再试。"
+        rm -f "$tmp_file"
         return 1
     fi
 
@@ -309,7 +310,13 @@ update_script() {
     fi
 
     echo "步骤 4/4: 备份并写入新脚本..."
-    cp "$script_path" "${script_path}.bak" 2>/dev/null && echo "已备份当前脚本到 ${script_path}.bak"
+    if ! cp "$script_path" "${script_path}.bak" 2>/dev/null; then
+        echo "备份当前脚本失败，已取消更新。"
+        rm -f "$tmp_file"
+        return 1
+    fi
+    echo "已备份当前脚本到 ${script_path}.bak"
+
     if ! cp "$tmp_file" "$script_path"; then
         echo "写入失败，请使用 sudo 重新运行后再试。"
         rm -f "$tmp_file"
@@ -336,8 +343,12 @@ update_script() {
 change_password() {
     local username
     username=$(whoami)
-    sudo passwd "$username"
-    echo "密码已成功修改。"
+    if sudo passwd "$username"; then
+        echo "密码已成功修改。"
+    else
+        echo -e "${RED}密码修改失败或已取消。${RESET}"
+        return 1
+    fi
 }
 
 # 检查并安装 ntpdate
@@ -348,10 +359,15 @@ install_ntpdate() {
 
     echo "正在安装 ntpdate..."
     if [ -f /etc/redhat-release ]; then
-        sudo yum install -y ntpdate
+        if ! sudo yum install -y ntpdate; then
+            echo -e "${RED}ntpdate 安装失败。${RESET}"
+            return 1
+        fi
     elif [ -f /etc/debian_version ]; then
-        sudo apt-get update
-        sudo apt-get install -y ntpdate
+        if ! sudo apt-get update || ! sudo apt-get install -y ntpdate; then
+            echo -e "${RED}ntpdate 安装失败。${RESET}"
+            return 1
+        fi
     else
         echo "不支持的操作系统类型。"
         return 1
@@ -363,14 +379,17 @@ install_ntpdate() {
 sync_shanghai_time() {
     install_ntpdate || return 1
     echo "正在同步上海时间..."
-    sudo timedatectl set-timezone Asia/Shanghai
-    sudo ntpdate cn.pool.ntp.org
-    echo "时间同步完成。"
+    if sudo timedatectl set-timezone Asia/Shanghai && sudo ntpdate cn.pool.ntp.org; then
+        echo "时间同步完成。"
+    else
+        echo -e "${RED}时间同步失败，请检查网络和系统时间服务。${RESET}"
+        return 1
+    fi
 }
 
 # 一键修改 SSH 端口
 change_ssh_port() {
-    local new_port use_socket socket_name dropin_dir restart_confirm server_ip
+    local new_port use_socket socket_name restart_confirm server_ip service_name sshd_bin
 
     read -p "请输入新的 SSH 端口: " new_port
     if ! [[ "$new_port" =~ ^[0-9]+$ ]]; then
@@ -384,78 +403,181 @@ change_ssh_port() {
     fi
 
     local SSH_CONFIG="/etc/ssh/sshd_config"
-    sudo cp "$SSH_CONFIG" "${SSH_CONFIG}.bak" 2>/dev/null
+    if [ ! -f "$SSH_CONFIG" ]; then
+        echo -e "${RED}错误：未找到 SSH 服务端配置文件 $SSH_CONFIG${RESET}"
+        return 1
+    fi
 
-    if grep -q "^Port " "$SSH_CONFIG"; then
-        sudo sed -i "s/^Port .*/Port $new_port/g" "$SSH_CONFIG"
-    elif grep -q "^#\s*Port " "$SSH_CONFIG"; then
-        sudo sed -i "s/^#\s*Port .*/Port $new_port/g" "$SSH_CONFIG"
+    if command -v sshd >/dev/null 2>&1; then
+        sshd_bin=$(command -v sshd)
+    elif [ -x /usr/sbin/sshd ]; then
+        sshd_bin="/usr/sbin/sshd"
     else
-        echo "Port $new_port" | sudo tee -a "$SSH_CONFIG" > /dev/null
+        echo -e "${RED}错误：未检测到 sshd，无法修改 SSH 服务端口。${RESET}"
+        return 1
+    fi
+
+    if ! sudo cp -p "$SSH_CONFIG" "${SSH_CONFIG}.bak"; then
+        echo -e "${RED}错误：无法备份 $SSH_CONFIG，已取消修改。${RESET}"
+        return 1
+    fi
+
+    if sudo grep -Eq '^[[:space:]]*Port[[:space:]]+[0-9]+[[:space:]]*$' "$SSH_CONFIG"; then
+        if ! sudo sed -i -E "s/^[[:space:]]*Port[[:space:]]+[0-9]+[[:space:]]*$/Port $new_port/" "$SSH_CONFIG"; then
+            echo -e "${RED}错误：修改 SSH 端口失败，正在恢复原配置...${RESET}"
+            sudo cp -p "${SSH_CONFIG}.bak" "$SSH_CONFIG"
+            return 1
+        fi
+    elif sudo grep -Eq '^[[:space:]]*#[[:space:]]*Port[[:space:]]+22[[:space:]]*$' "$SSH_CONFIG"; then
+        if ! sudo sed -i -E "s/^[[:space:]]*#[[:space:]]*Port[[:space:]]+22[[:space:]]*$/Port $new_port/" "$SSH_CONFIG"; then
+            echo -e "${RED}错误：修改 SSH 端口失败，正在恢复原配置...${RESET}"
+            sudo cp -p "${SSH_CONFIG}.bak" "$SSH_CONFIG"
+            return 1
+        fi
+    else
+        echo -e "${RED}错误：未找到全局 #Port 22 或 Port 配置，已取消修改。${RESET}"
+        echo "脚本不会在 sshd_config 文件末尾追加 Port，以免写入 Match 配置块。"
+        return 1
     fi
 
     use_socket=0
     socket_name=""
-    if systemctl is-active --quiet ssh.socket; then
-        use_socket=1
-        socket_name="ssh.socket"
-    elif systemctl is-active --quiet sshd.socket; then
-        use_socket=1
-        socket_name="sshd.socket"
-    fi
-
-    if [ "$use_socket" -eq 1 ]; then
-        echo -e "${YELLOW}检测到系统当前正在使用 Socket 模式管理 SSH (${socket_name})，正在进行兼容性配置...${RESET}"
-        dropin_dir="/etc/systemd/system/${socket_name}.d"
-        sudo mkdir -p "$dropin_dir"
-        cat <<EOF | sudo tee "$dropin_dir/listen.conf" > /dev/null
-[Socket]
-ListenStream=
-ListenStream=$new_port
-EOF
-        echo "Systemd Socket 端口覆盖配置已生成。"
-    fi
-
-    if ! sudo sshd -t 2>/dev/null; then
-        echo -e "${RED}SSH 配置检测失败，正在恢复原配置...${RESET}"
-        sudo cp "${SSH_CONFIG}.bak" "$SSH_CONFIG"
-        if [ "$use_socket" -eq 1 ]; then
-            sudo rm -f "/etc/systemd/system/${socket_name}.d/listen.conf"
+    service_name=""
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl is-active --quiet ssh.socket || systemctl is-enabled --quiet ssh.socket 2>/dev/null; then
+            use_socket=1
+            socket_name="ssh.socket"
+        elif systemctl is-active --quiet sshd.socket || systemctl is-enabled --quiet sshd.socket 2>/dev/null; then
+            use_socket=1
+            socket_name="sshd.socket"
         fi
+
+        if systemctl list-unit-files --type=service 2>/dev/null | grep -q '^sshd\.service[[:space:]]'; then
+            service_name="sshd"
+        elif systemctl list-unit-files --type=service 2>/dev/null | grep -q '^ssh\.service[[:space:]]'; then
+            service_name="ssh"
+        fi
+    fi
+
+    if ! sudo "$sshd_bin" -t; then
+        echo -e "${RED}SSH 配置检测失败，正在恢复原配置...${RESET}"
+        sudo cp -p "${SSH_CONFIG}.bak" "$SSH_CONFIG"
         return 1
     fi
 
-    if command -v ufw >/dev/null 2>&1; then
-        sudo ufw allow "$new_port"/tcp >/dev/null 2>&1
+    if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" = "Enforcing" ] && [ "$new_port" -ne 22 ]; then
+        if ! command -v semanage >/dev/null 2>&1; then
+            echo -e "${RED}错误：SELinux 正在强制执行，但系统未安装 semanage。${RESET}"
+            echo "请先安装 policycoreutils-python-utils 后重试。"
+            sudo cp -p "${SSH_CONFIG}.bak" "$SSH_CONFIG"
+            return 1
+        fi
+
+        if ! sudo semanage port -l | awk -v port="$new_port" '
+            $1 == "ssh_port_t" && $2 == "tcp" {
+                for (i = 3; i <= NF; i++) {
+                    gsub(/,/, "", $i)
+                    if ($i == port) {
+                        found = 1
+                    } else if ($i ~ /^[0-9]+-[0-9]+$/) {
+                        split($i, range, "-")
+                        if (port >= range[1] && port <= range[2]) found = 1
+                    }
+                }
+            }
+            END {exit(found ? 0 : 1)}
+        '; then
+            if ! sudo semanage port -a -t ssh_port_t -p tcp "$new_port"; then
+                echo -e "${RED}错误：无法将端口 $new_port 添加到 SELinux ssh_port_t。${RESET}"
+                sudo cp -p "${SSH_CONFIG}.bak" "$SSH_CONFIG"
+                return 1
+            fi
+        fi
     fi
 
-    if command -v firewall-cmd >/dev/null 2>&1; then
-        sudo firewall-cmd --permanent --add-port=${new_port}/tcp >/dev/null 2>&1
-        sudo firewall-cmd --reload >/dev/null 2>&1
+    if command -v ufw >/dev/null 2>&1 && sudo ufw status 2>/dev/null | grep -q '^Status: active'; then
+        if ! sudo ufw allow "$new_port"/tcp; then
+            echo -e "${RED}错误：UFW 放行端口失败，已取消修改。${RESET}"
+            sudo cp -p "${SSH_CONFIG}.bak" "$SSH_CONFIG"
+            return 1
+        fi
     fi
 
-    echo -e "${GREEN}SSH 端口配置成功，新端口: $new_port${RESET}"
+    if command -v firewall-cmd >/dev/null 2>&1 && sudo firewall-cmd --state >/dev/null 2>&1; then
+        if ! sudo firewall-cmd --permanent --add-port="${new_port}/tcp" || ! sudo firewall-cmd --reload; then
+            echo -e "${RED}错误：firewalld 放行端口失败，已取消修改。${RESET}"
+            sudo cp -p "${SSH_CONFIG}.bak" "$SSH_CONFIG"
+            return 1
+        fi
+    fi
+
     read -p "是否立即重启 SSH 服务使配置生效？(y/n): " restart_confirm
 
     if [[ "$restart_confirm" =~ ^[Yy]$ ]]; then
         if [ "$use_socket" -eq 1 ]; then
-            sudo systemctl daemon-reload
-            sudo systemctl restart "$socket_name"
+            if ! sudo systemctl daemon-reload || ! sudo systemctl restart "$socket_name"; then
+                echo -e "${RED}Socket 重启失败，正在恢复原配置...${RESET}"
+                sudo cp -p "${SSH_CONFIG}.bak" "$SSH_CONFIG"
+                sudo systemctl daemon-reload
+                sudo systemctl restart "$socket_name" 2>/dev/null
+                [ -n "$service_name" ] && sudo systemctl restart "$service_name" 2>/dev/null
+                return 1
+            fi
         fi
 
-        if systemctl list-unit-files | grep -q '^sshd.service'; then
-            sudo systemctl restart sshd
+        if [ -n "$service_name" ]; then
+            if ! sudo systemctl restart "$service_name"; then
+                echo -e "${RED}SSH 服务重启失败，正在恢复原配置...${RESET}"
+                sudo cp -p "${SSH_CONFIG}.bak" "$SSH_CONFIG"
+                if [ "$use_socket" -eq 1 ]; then
+                    sudo systemctl daemon-reload
+                    sudo systemctl restart "$socket_name" 2>/dev/null
+                fi
+                sudo systemctl restart "$service_name" 2>/dev/null
+                return 1
+            fi
+        elif command -v service >/dev/null 2>&1; then
+            if [ -x /etc/init.d/sshd ]; then
+                service_name="sshd"
+            elif [ -x /etc/init.d/ssh ]; then
+                service_name="ssh"
+            fi
+
+            if [ -z "$service_name" ] || ! sudo service "$service_name" restart; then
+                echo -e "${RED}SSH 服务重启失败，正在恢复原配置...${RESET}"
+                sudo cp -p "${SSH_CONFIG}.bak" "$SSH_CONFIG"
+                [ -n "$service_name" ] && sudo service "$service_name" restart 2>/dev/null
+                return 1
+            fi
         else
-            sudo systemctl restart ssh
+            echo -e "${RED}错误：未检测到可重启的 SSH 服务。${RESET}"
+            sudo cp -p "${SSH_CONFIG}.bak" "$SSH_CONFIG"
+            return 1
+        fi
+
+        if command -v ss >/dev/null 2>&1 && ! sudo ss -H -ltn "sport = :$new_port" 2>/dev/null | grep -q .; then
+            echo -e "${RED}错误：重启后未检测到端口 $new_port 正在监听，正在恢复原配置...${RESET}"
+            sudo cp -p "${SSH_CONFIG}.bak" "$SSH_CONFIG"
+            if [ "$use_socket" -eq 1 ]; then
+                sudo systemctl daemon-reload
+                sudo systemctl restart "$socket_name" 2>/dev/null
+            fi
+            if command -v systemctl >/dev/null 2>&1 && [ -n "$service_name" ]; then
+                sudo systemctl restart "$service_name" 2>/dev/null
+            elif [ -n "$service_name" ]; then
+                sudo service "$service_name" restart 2>/dev/null
+            fi
+            return 1
         fi
 
         server_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
-        echo "SSH 服务已重启"
+        echo -e "${GREEN}SSH 端口修改成功，新端口: $new_port${RESET}"
         echo -e "${YELLOW}请务必保留当前终端，并新开一个窗口测试连接：${RESET}"
         echo "ssh -p $new_port $(whoami)@$server_ip"
     else
-        echo "已取消重启，配置将在下次手动重启服务或重载 Systemd 后生效。"
+        echo "已取消重启。请稍后手动重启 SSH 服务；Socket 模式还需重载 Systemd 并重启对应 Socket。"
     fi
+
 }
 
 # 一键修改 DNS
@@ -486,25 +608,62 @@ set_dns() {
 
 # 一键开启/关闭 SSH 登录
 toggle_ssh() {
-    local service_name
+    local service_name ssh_active=0 unit failed=0
+    local socket_units=()
 
-    if systemctl list-unit-files | grep -q '^sshd.service'; then
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo "当前系统未使用 Systemd，无法通过此功能切换 SSH。"
+        return 1
+    fi
+
+    if systemctl list-unit-files --type=service 2>/dev/null | grep -q '^sshd\.service[[:space:]]'; then
         service_name="sshd"
-    elif systemctl list-unit-files | grep -q '^ssh.service'; then
+    elif systemctl list-unit-files --type=service 2>/dev/null | grep -q '^ssh\.service[[:space:]]'; then
         service_name="ssh"
     else
         echo "未检测到 ssh/sshd 服务。"
         return 1
     fi
 
+    if systemctl list-unit-files --type=socket 2>/dev/null | grep -q '^ssh\.socket[[:space:]]'; then
+        socket_units+=("ssh.socket")
+    fi
+    if systemctl list-unit-files --type=socket 2>/dev/null | grep -q '^sshd\.socket[[:space:]]'; then
+        socket_units+=("sshd.socket")
+    fi
+
     if sudo systemctl is-active --quiet "$service_name"; then
-        sudo systemctl stop "$service_name"
-        sudo systemctl disable "$service_name"
-        echo "SSH登录已禁用"
+        ssh_active=1
+    fi
+    for unit in "${socket_units[@]}"; do
+        if sudo systemctl is-active --quiet "$unit"; then
+            ssh_active=1
+        fi
+    done
+
+    if [ "$ssh_active" -eq 1 ]; then
+        for unit in "${socket_units[@]}"; do
+            sudo systemctl disable --now "$unit" || failed=1
+        done
+        sudo systemctl disable --now "$service_name" || failed=1
+
+        if [ "$failed" -eq 0 ]; then
+            echo "SSH 登录已禁用（服务和 Socket 均已停止）。"
+        else
+            echo -e "${RED}SSH 未能完全禁用，请检查上方错误信息。${RESET}"
+            return 1
+        fi
     else
-        sudo systemctl enable "$service_name"
-        sudo systemctl start "$service_name"
-        echo "SSH登录已启用"
+        for unit in "${socket_units[@]}"; do
+            sudo systemctl disable --now "$unit" >/dev/null 2>&1 || true
+        done
+
+        if sudo systemctl enable --now "$service_name"; then
+            echo "SSH 登录已启用。"
+        else
+            echo -e "${RED}SSH 登录启用失败。${RESET}"
+            return 1
+        fi
     fi
 }
 
@@ -515,9 +674,13 @@ update_centos() {
     read -p "确认要更新 CentOS 最新版系统吗？(y/n): " confirm
     if [[ "$confirm" == [yY] ]]; then
         echo "正在更新 CentOS 最新版系统..."
-        sudo yum update -y
-        echo "CentOS 最新版系统更新完成"
-        sudo reboot
+        if sudo yum update -y; then
+            echo "CentOS 最新版系统更新完成"
+            sudo reboot
+        else
+            echo -e "${RED}CentOS 系统更新失败，已取消重启。${RESET}"
+            return 1
+        fi
     else
         echo "取消更新 CentOS 最新版系统"
     fi
@@ -530,10 +693,13 @@ update_ubuntu() {
     read -p "确认要更新 Ubuntu 最新版系统吗？(y/n): " confirm
     if [[ "$confirm" == [yY] ]]; then
         echo "正在更新 Ubuntu 最新版系统..."
-        sudo apt update
-        sudo apt upgrade -y
-        echo "Ubuntu 最新版系统更新完成"
-        sudo reboot
+        if sudo apt update && sudo apt upgrade -y; then
+            echo "Ubuntu 最新版系统更新完成"
+            sudo reboot
+        else
+            echo -e "${RED}Ubuntu 系统更新失败，已取消重启。${RESET}"
+            return 1
+        fi
     else
         echo "取消更新 Ubuntu 最新版系统"
     fi
@@ -546,10 +712,13 @@ update_debian() {
     read -p "确认要更新 Debian 最新版系统吗？(y/n): " confirm
     if [[ "$confirm" == [yY] ]]; then
         echo "正在更新 Debian 最新版系统..."
-        sudo apt update
-        sudo apt upgrade -y
-        echo "Debian 最新版系统更新完成"
-        sudo reboot
+        if sudo apt update && sudo apt upgrade -y; then
+            echo "Debian 最新版系统更新完成"
+            sudo reboot
+        else
+            echo -e "${RED}Debian 系统更新失败，已取消重启。${RESET}"
+            return 1
+        fi
     else
         echo "取消更新 Debian 最新版系统"
     fi
@@ -576,6 +745,11 @@ create_user() {
         return 1
     fi
 
+    if ! [[ "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+        echo "用户名必须以小写字母或下划线开头，且只能包含小写字母、数字、下划线和连字符（最多 32 个字符）。"
+        return 1
+    fi
+
     if id "$username" &>/dev/null; then
         echo "用户 $username 已存在"
         return 0
@@ -588,7 +762,10 @@ create_user() {
     fi
 
     echo "用户 $username 创建成功"
-    sudo passwd "$username"
+    if ! sudo passwd "$username"; then
+        echo -e "${RED}用户已创建，但密码设置失败；该账户当前无法通过密码登录。${RESET}"
+        return 1
+    fi
 
     read -p "是否要将用户 $username 设置为管理员(y/n): " add_sudo
     if [[ "$add_sudo" =~ ^[Yy]$ ]]; then
@@ -597,8 +774,12 @@ create_user() {
         else
             sudo_group="wheel"
         fi
-        sudo usermod -aG "$sudo_group" "$username"
-        echo "用户 $username 已加入 $sudo_group 管理员组"
+        if sudo usermod -aG "$sudo_group" "$username"; then
+            echo "用户 $username 已加入 $sudo_group 管理员组"
+        else
+            echo -e "${RED}用户已创建，但加入 $sudo_group 管理员组失败。${RESET}"
+            return 1
+        fi
     fi
 }
 
@@ -627,7 +808,20 @@ install_netstat() {
 # 查看连接到本机的远程 IP 地址数量
 show_connected_ips_count() {
     install_netstat || return 1
-    netstat -tn | awk '{print $5}' | grep -v 'Address' | cut -d: -f1 | sort | uniq -c | sort -nr
+    netstat -tn 2>/dev/null | awk '
+        /^tcp/ {
+            remote = $5
+            if (remote ~ /^\[/) {
+                sub(/^\[/, "", remote)
+                sub(/\]:[0-9*]+$/, "", remote)
+            } else {
+                sub(/:[0-9*]+$/, "", remote)
+            }
+            if (remote != "" && remote != "0.0.0.0" && remote != "::") {
+                print remote
+            }
+        }
+    ' | sort | uniq -c | sort -nr
 }
 
 # 一键修改服务器主机名
@@ -731,7 +925,21 @@ show_login_ips() {
         return 1
     fi
 
-    grep 'sshd.*Accepted' "$log_file_path" | awk '{print $11}' | sort | uniq
+    if ! sudo test -r "$log_file_path"; then
+        echo "无法读取日志文件：$log_file_path"
+        return 1
+    fi
+
+    sudo awk '
+        /sshd.*Accepted/ {
+            for (i = 1; i < NF; i++) {
+                if ($i == "from") {
+                    print $(i + 1)
+                    break
+                }
+            }
+        }
+    ' "$log_file_path" | sort -u
 }
 
 # 查看当前服务器时区与时间
@@ -747,9 +955,25 @@ show_timezone() {
     echo "========================"
 }
 
+# 恢复修改前的 /swapfile，不影响其他交换设备
+restore_previous_swapfile() {
+    local backup_path="$1"
+    local was_active="$2"
+
+    sudo swapoff /swapfile >/dev/null 2>&1 || true
+    sudo rm -f /swapfile
+
+    if [ -n "$backup_path" ] && sudo test -e "$backup_path"; then
+        sudo mv "$backup_path" /swapfile
+        if [ "$was_active" -eq 1 ]; then
+            sudo swapon /swapfile >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
 # SWAP 设置菜单
 set_swap_menu() {
-    local swap_choice swap_size_mb
+    local swap_choice swap_size_mb swap_was_active swap_backup fstab_backup
 
     echo "========================="
     echo "     SWAP 大小设置"
@@ -777,8 +1001,8 @@ set_swap_menu() {
             ;;
         5)
             read -p "请输入SWAP大小(MB): " swap_size_mb
-            if ! [[ "$swap_size_mb" =~ ^[0-9]+$ ]]; then
-                echo "请输入正确的数字"
+            if ! [[ "$swap_size_mb" =~ ^[0-9]+$ ]] || [ "$swap_size_mb" -lt 1 ]; then
+                echo "请输入大于 0 的整数"
                 return 1
             fi
             ;;
@@ -789,19 +1013,74 @@ set_swap_menu() {
     esac
 
     echo "准备设置 ${swap_size_mb}MB SWAP..."
-    sudo swapoff -a 2>/dev/null
-    sudo sed -i '/\/swapfile/d' /etc/fstab
-    sudo rm -f /swapfile
 
-    sudo fallocate -l "${swap_size_mb}M" /swapfile
-    if [ $? -ne 0 ]; then
-        sudo dd if=/dev/zero of=/swapfile bs=1M count="$swap_size_mb"
+    if [ ! -f /etc/fstab ]; then
+        echo -e "${RED}错误：未找到 /etc/fstab，已取消操作。${RESET}"
+        return 1
     fi
 
-    sudo chmod 600 /swapfile
-    sudo mkswap /swapfile
-    sudo swapon /swapfile
-    echo '/swapfile swap swap defaults 0 0' | sudo tee -a /etc/fstab >/dev/null
+    swap_was_active=0
+    swap_backup=""
+    fstab_backup=$(mktemp) || {
+        echo -e "${RED}错误：无法创建临时备份文件。${RESET}"
+        return 1
+    }
+
+    if awk 'NR > 1 {print $1}' /proc/swaps 2>/dev/null | grep -Fxq /swapfile; then
+        swap_was_active=1
+        if ! sudo swapoff /swapfile; then
+            echo -e "${RED}错误：无法停用现有 /swapfile，已取消操作。${RESET}"
+            rm -f "$fstab_backup"
+            return 1
+        fi
+    fi
+
+    if sudo test -L /swapfile; then
+        echo -e "${RED}错误：/swapfile 是符号链接，为避免误操作已取消。${RESET}"
+        [ "$swap_was_active" -eq 1 ] && sudo swapon /swapfile >/dev/null 2>&1
+        rm -f "$fstab_backup"
+        return 1
+    fi
+
+    if sudo test -e /swapfile; then
+        swap_backup="/swapfile.linuxtools.$$.bak"
+        if sudo test -e "$swap_backup" || ! sudo mv /swapfile "$swap_backup"; then
+            echo -e "${RED}错误：无法备份现有 /swapfile，已取消操作。${RESET}"
+            [ "$swap_was_active" -eq 1 ] && sudo swapon /swapfile >/dev/null 2>&1
+            rm -f "$fstab_backup"
+            return 1
+        fi
+    fi
+
+    if ! sudo fallocate -l "${swap_size_mb}M" /swapfile; then
+        sudo rm -f /swapfile
+        if ! sudo dd if=/dev/zero of=/swapfile bs=1M count="$swap_size_mb" status=progress; then
+            echo -e "${RED}错误：创建新的 /swapfile 失败，正在恢复原文件...${RESET}"
+            restore_previous_swapfile "$swap_backup" "$swap_was_active"
+            rm -f "$fstab_backup"
+            return 1
+        fi
+    fi
+
+    if ! sudo chmod 600 /swapfile || ! sudo mkswap /swapfile || ! sudo swapon /swapfile; then
+        echo -e "${RED}错误：初始化新的 /swapfile 失败，正在恢复原文件...${RESET}"
+        restore_previous_swapfile "$swap_backup" "$swap_was_active"
+        rm -f "$fstab_backup"
+        return 1
+    fi
+
+    if ! sudo cp -p /etc/fstab "$fstab_backup" || \
+       ! sudo sed -i -E '/^[[:space:]]*\/swapfile[[:space:]]/d' /etc/fstab || \
+       ! echo '/swapfile swap swap defaults 0 0' | sudo tee -a /etc/fstab >/dev/null; then
+        echo -e "${RED}错误：更新 /etc/fstab 失败，正在恢复原配置...${RESET}"
+        sudo cp -p "$fstab_backup" /etc/fstab 2>/dev/null
+        restore_previous_swapfile "$swap_backup" "$swap_was_active"
+        sudo rm -f "$fstab_backup" 2>/dev/null
+        return 1
+    fi
+
+    [ -n "$swap_backup" ] && sudo rm -f "$swap_backup"
+    sudo rm -f "$fstab_backup" 2>/dev/null
 
     echo "SWAP 设置完成"
     free -h
@@ -5128,4 +5407,3 @@ main() {
 main "$@"
 
 # __HARDWARE_INFO_SH_PAYLOAD_END__
-
